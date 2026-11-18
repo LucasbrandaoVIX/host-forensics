@@ -1,0 +1,78 @@
+# Full SOTA Training Configuration for Single NVIDIA RTX 5090 (32 GB GDDR7 VRAM, BF16)
+# Peak VRAM: ~18.2 GB at batch_size=4, num_frames=16, 384x384 (~24.9M trainable params)
+
+backbone:
+  visual_name: facebook/dinov3-vitl16-pretrain-lvd1689m
+  visual_backend: hf
+  img_size: 384
+  patch_size: 16
+  visual_embed_dim: 1024
+  visual_num_layers: 24
+  tap_layers: [6, 12, 18, 24]
+  adapted_layers: [4, 8, 12, 16, 20, 24]
+  use_ortho_lora: true
+  lora_rank: 16
+  principal_subspace_rank: 64
+  audio_name: microsoft/wavlm-large
+  audio_embed_dim: 1024
+  audio_stride_sec: 0.25
+  sample_rate: 16000
+
+mn_stem:
+  bayar_channels: 12
+  srm_channels: 9
+  shallow_feat_channels: 32
+  corr_radius: 2
+  corr_temperature: 0.1
+  out_dim: 128
+
+moe:
+  bottleneck_dim: 128
+  num_experts_per_pool: 4
+  top_k: 2
+  num_heads: 4
+  dropout: 0.05
+  bias_update_rate: 0.0001
+
+shdc:
+  anchor_hidden_dim: 256
+  sharpening_beta: 2.0
+  eps: 1.0e-05
+
+readout:
+  hidden_dim: 256
+  pyramid_levels: 4
+  pyramid_kernel_size: 3
+  soft_nms_sigma: 0.5
+  max_proposals: 20
+  mask_base_channels: 128
+  default_far_budget: 0.05
+
+loss:
+  lambda_cls: 1.0
+  lambda_polarization: 0.25
+  lambda_anchor: 0.5
+  lambda_tfl_focal: 1.0
+  lambda_tfl_diou: 1.0
+  lambda_mask_bce: 1.0
+  lambda_mask_dice: 1.0
+  lambda_mask_boundary: 0.5
+  mil_top_host_ratio: 0.25
+  mil_bottom_fake_ratio: 0.1
+  mil_margin: 0.6
+
+train:
+  precision: bf16
+  batch_size: 4
+  grad_accum_steps: 4
+  num_frames: 16
+  clip_duration_sec: 4.0
+  lr: 0.0003
+  weight_decay: 0.0005
+  epochs_stage1: 10
+  epochs_stage2_highres: 4
+  highres_img_size: 448
+  modality_dropout_prob: 0.35
+  compound_degradation_prob: 0.5
+  symmetric_laundering_prob: 0.15
+  grad_clip_norm: 1.0

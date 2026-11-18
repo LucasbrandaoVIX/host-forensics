@@ -1,0 +1,110 @@
+{
+  "exp1_shdc_depolarization": {
+    "unconditioned_baseline": {
+      "within_auc": 96.88,
+      "pooled_auc": 98.4,
+      "polarization_w1": 0.2734,
+      "cross_auc": 70.39,
+      "mid_acc": 84.67,
+      "realized_far": 30.67
+    },
+    "shdc_plus_pristine_calibrator": {
+      "within_auc": 97.4,
+      "pooled_auc": 97.41,
+      "polarization_w1": 0.0425,
+      "cross_auc": 93.26,
+      "mid_acc": 77.67,
+      "realized_far": 0.67
+    }
+  },
+  "exp2_moe_bias_balancing": {
+    "unbalanced_gamma_0": [
+      {
+        "step": 1,
+        "normalized_entropy": 0.7852,
+        "max_min_load_gap": 0.3672
+      },
+      {
+        "step": 10,
+        "normalized_entropy": 0.8438,
+        "max_min_load_gap": 0.3242
+      },
+      {
+        "step": 20,
+        "normalized_entropy": 0.8348,
+        "max_min_load_gap": 0.3398
+      },
+      {
+        "step": 30,
+        "normalized_entropy": 0.8265,
+        "max_min_load_gap": 0.334
+      },
+      {
+        "step": 40,
+        "normalized_entropy": 0.8581,
+        "max_min_load_gap": 0.3105
+      },
+      {
+        "step": 50,
+        "normalized_entropy": 0.8216,
+        "max_min_load_gap": 0.3496
+      },
+      {
+        "step": 60,
+        "normalized_entropy": 0.8417,
+        "max_min_load_gap": 0.3242
+      },
+      {
+        "step": 80,
+        "normalized_entropy": 0.8481,
+        "max_min_load_gap": 0.3164
+      }
+    ],
+    "bias_balanced_gamma_0_05": [
+      {
+        "step": 1,
+        "normalized_entropy": 0.7852,
+        "max_min_load_gap": 0.3672
+      },
+      {
+        "step": 10,
+        "normalized_entropy": 0.9084,
+        "max_min_load_gap": 0.2598
+      },
+      {
+        "step": 20,
+        "normalized_entropy": 0.9521,
+        "max_min_load_gap": 0.2051
+      },
+      {
+        "step": 30,
+        "normalized_entropy": 0.9765,
+        "max_min_load_gap": 0.1523
+      },
+      {
+        "step": 40,
+        "normalized_entropy": 0.9969,
+        "max_min_load_gap": 0.0547
+      },
+      {
+        "step": 50,
+        "normalized_entropy": 0.9996,
+        "max_min_load_gap": 0.0234
+      },
+      {
+        "step": 60,
+        "normalized_entropy": 0.9994,
+        "max_min_load_gap": 0.0254
+      },
+      {
+        "step": 80,
+        "normalized_entropy": 0.9949,
+        "max_min_load_gap": 0.0684
+      }
+    ]
+  },
+  "exp3_mn_stem_object_removal": {
+    "rgb_semantic_color_patch_auroc": 45.73,
+    "mn_stem_forensic_residual_auroc": 96.09
+  }
+}
