@@ -16,6 +16,15 @@ Unlike whole-video synthetic T2V detectors, **HoST-MoE** exploits the foundation
 
 ---
 
+## Research & Documentation
+
+- **Compiled 7-Page Research Manuscript (PDF):** [`paper/main.pdf`](paper/main.pdf) (LaTeX source: [`paper/main.tex`](paper/main.tex), BibTeX: [`paper/references.bib`](paper/references.bib))
+- **Literature Survey & 8-Family Mitigation Matrix (2018–2026):** [`docs/literature_review_and_mitigation_matrix.md`](docs/literature_review_and_mitigation_matrix.md)
+- **Complete Mathematical & Architectural Specification:** [`docs/mathematical_and_architectural_spec.md`](docs/mathematical_and_architectural_spec.md)
+- **Controlled Empirical Mechanism Verification Results:** [`docs/empirical_verification_results.md`](docs/empirical_verification_results.md) (raw JSON: [`paper/figures/poc_results.json`](paper/figures/poc_results.json))
+
+---
+
 ## Repository Structure
 
 ```text
@@ -23,6 +32,10 @@ host-forensics/
 ├── configs/
 │   ├── rtx5090_unified_train.yaml   # Full DINOv3-L + WavLM BF16 config for 1x RTX 5090 (32 GB)
 │   └── smoke_cpu_or_ci.yaml         # Compact offline-safe config for instant CI & smoke tests
+├── docs/
+│   ├── literature_review_and_mitigation_matrix.md  # 2018-2026 survey & 8-family mitigation matrix
+│   ├── mathematical_and_architectural_spec.md      # Full equations, Proposition 1 proof & VRAM table
+│   └── empirical_verification_results.md           # Executed PoC verification tables & insights
 ├── paper/
 │   ├── main.tex                     # Two-column CVPR/NeurIPS research manuscript (TikZ + PGFPlots)
 │   ├── references.bib               # Verified 2012-2026 forensic bibliography
