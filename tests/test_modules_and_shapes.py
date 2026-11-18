@@ -170,3 +170,128 @@ def test_cli_entrypoints() -> None:
     assert main(["smoke-train", "--epochs", "1", "--num-samples", "4", "--device", "cpu"]) == 0
     assert main(["infer", "--silent", "--device", "cpu"]) == 0
 
+
+def test_hf_visual_in_stream_hooks_and_wavlm_audio_backbone() -> None:
+    from types import SimpleNamespace
+    import torch.nn as nn
+    from host_forensics.config import BackboneConfig, TriSTMoEConfig
+    from host_forensics.models.backbones import FrozenAudioBackbone, MultiPriorVisualBackbone
+
+    torch.manual_seed(7)
+
+    class _MockHFBlock(nn.Module):
+        def __init__(self, dim: int) -> None:
+            super().__init__()
+            self.norm = nn.LayerNorm(dim)
+            self.q_proj = nn.Linear(dim, dim)
+            self.k_proj = nn.Linear(dim, dim)
+            self.v_proj = nn.Linear(dim, dim)
+            self.o_proj = nn.Linear(dim, dim)
+
+        def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, None]:
+            h = self.norm(x)
+            out = x + self.o_proj(self.q_proj(h) + self.k_proj(h) + self.v_proj(h)) * 0.1
+            return (out, None)
+
+    class _MockDINOv3Model(nn.Module):
+        """Mimics HF DINOv3/ViT with 1 CLS + 4 register tokens + tuple block outputs."""
+
+        def __init__(self, dim: int = 64, patch_size: int = 16, num_layers: int = 4) -> None:
+            super().__init__()
+            self.patch_embed = nn.Conv2d(3, dim, kernel_size=patch_size, stride=patch_size)
+            self.cls_and_reg = nn.Parameter(torch.randn(1, 5, dim) * 0.02)
+            self.layer = nn.ModuleList([_MockHFBlock(dim) for _ in range(num_layers)])
+
+        def forward(
+            self, pixel_values: torch.Tensor, interpolate_pos_encoding: bool = False
+        ) -> SimpleNamespace:
+            _ = interpolate_pos_encoding
+            patches = self.patch_embed(pixel_values).flatten(2).transpose(1, 2)
+            x = torch.cat([self.cls_and_reg.expand(patches.shape[0], -1, -1), patches], dim=1)
+            for blk in self.layer:
+                x = blk(x)[0]
+            return SimpleNamespace(last_hidden_state=x)
+
+    vis_cfg = BackboneConfig(
+        visual_backend="hf",
+        img_size=64,
+        patch_size=16,
+        visual_embed_dim=64,
+        visual_num_layers=4,
+        tap_layers=(2, 4),
+        adapted_layers=(1, 3),
+        use_ortho_lora=True,
+        lora_rank=4,
+        principal_subspace_rank=8,
+    )
+    moe_cfg = TriSTMoEConfig(bottleneck_dim=32, num_experts_per_pool=2, top_k=1, num_heads=4)
+
+    mock_dino = _MockDINOv3Model(dim=64, patch_size=16, num_layers=4)
+    vis_backbone = MultiPriorVisualBackbone(vis_cfg, moe_cfg, mn_res_dim=32, hf_model=mock_dino)
+    vis_backbone.train(True)
+
+    # Frozen HF backbone stays in eval(), while MoE adapters are in train()
+    assert vis_backbone._hf_model is not None and not vis_backbone._hf_model.training
+    assert vis_backbone.moe_adapters.training
+    assert isinstance(mock_dino.layer[0].q_proj, OrthogonalSVDLinear)
+    assert isinstance(mock_dino.layer[0].v_proj, OrthogonalSVDLinear)
+    assert not isinstance(mock_dino.layer[0].k_proj, OrthogonalSVDLinear)
+
+    # Verify Stage-1 (64x64 -> P=16) and Stage-2 (96x96 -> P=36) forward + in-stream propagation
+    vid_s1 = torch.randn(2, 3, 3, 64, 64)
+    res_s1 = torch.randn(2, 3, 16, 32)
+    vis_backbone.eval()
+    fused_a, skip_a = vis_backbone(vid_s1, res_s1)
+    assert fused_a.shape == (2, 3, 16, 64)
+    assert skip_a.shape == (2, 3, 16, 32)
+
+    # Perturbing adapter at block 1 MUST alter tapped features at block 2 (proving in-stream hook!)
+    with torch.no_grad():
+        for p in vis_backbone.moe_adapters["1"].parameters():
+            p.add_(0.5)
+    fused_b, skip_b = vis_backbone(vid_s1, res_s1)
+    assert not torch.allclose(skip_a, skip_b, atol=1e-4)
+    assert not torch.allclose(fused_a, fused_b, atol=1e-4)
+
+    vid_s2 = torch.randn(2, 3, 3, 96, 96)
+    res_s2 = torch.randn(2, 3, 36, 32)
+    fused_s2, _ = vis_backbone(vid_s2, res_s2)
+    assert fused_s2.shape == (2, 3, 36, 64)
+
+    # Verify unconstrained LoRA toggle (Ablation A1: orthogonal=False)
+    base_lin = nn.Linear(32, 32)
+    lora_std = OrthogonalSVDLinear(base_lin, rank=4, principal_rank=8, orthogonal=False)
+    with torch.no_grad():
+        lora_std.lora_b.normal_(0.0, 0.3)
+        lora_std.lora_a.normal_(0.0, 0.3)
+    dw_std = lora_std.delta_weight_orthogonal()
+    assert torch.norm(lora_std.u_k.T @ dw_std).item() > 1e-3
+
+    # Verify HF WavLM audio backbone wrapper
+    class _MockWavLM(nn.Module):
+        def __init__(self, hidden_size: int = 48) -> None:
+            super().__init__()
+            self.config = SimpleNamespace(hidden_size=hidden_size)
+            self.proj = nn.Conv1d(1, hidden_size, kernel_size=8, stride=4)
+
+        def forward(
+            self, input_values: torch.Tensor, output_hidden_states: bool = True
+        ) -> SimpleNamespace:
+            _ = output_hidden_states
+            feat = self.proj(input_values.unsqueeze(1)).transpose(1, 2)
+            hs = tuple(feat * (1.0 + 0.1 * i) for i in range(5))
+            return SimpleNamespace(last_hidden_state=hs[-1], hidden_states=hs)
+
+    mock_wavlm = _MockWavLM(hidden_size=48)
+    aud_backbone = FrozenAudioBackbone(vis_cfg, out_dim=32, hf_audio_model=mock_wavlm)
+    aud_backbone.train(True)
+    assert aud_backbone._hf_audio_model is not None and not aud_backbone._hf_audio_model.training
+
+    wav = torch.randn(2, 16000)
+    aud_tok = aud_backbone(wav, target_steps=8)
+    assert aud_tok.shape == (2, 8, 32)
+    aud_tok.sum().backward()
+    assert mock_wavlm.proj.weight.grad is None
+    assert aud_backbone.detail_proj.weight.grad is not None
+
+

@@ -4,15 +4,21 @@ Implements:
 1. `OrthogonalSVDLinear`: Principal-subspace-preserving low-rank residual adaptation (Effort, ICML'25):
        W = W_0 + (I - U_k U_k^T) B A (I - V_k V_k^T)
    guaranteeing that learned forensic updates lie strictly in the orthogonal complement of the
-   pretrained foundation model's principal semantic directions.
-2. `MultiPriorVisualBackbone`: Wraps HuggingFace DINOv3 / CLIP ViTs (or an offline-safe ViT stand-in
-   for CI/testing), taps intermediate patch tokens across depths, and executes `TriSTMoEAdapter`
-   at designated transformer blocks.
-3. `FrozenAudioBackbone`: Wraps WavLM-Large / Qwen3-Omni audio encoders (or an offline-safe stand-in)
-   and extracts paired intermediate ("detail") and top ("interface") tokens at 0.25s temporal stride.
+   pretrained foundation model's principal semantic directions (with `orthogonal=False` supporting
+   apples-to-apples standard unconstrained LoRA `W = W_0 + B A` for Ablation A1).
+2. `MultiPriorVisualBackbone`: Wraps HuggingFace DINOv3 / DINOv2 / CLIP / ViT models (or an
+   offline-safe ViT stand-in for CI/testing), injects `TriSTMoEAdapter` **in-stream** via
+   transformer block forward hooks (preserving CLS + register tokens), and taps intermediate
+   patch tokens across depths without storing unused hidden states.
+3. `FrozenAudioBackbone`: Wraps HuggingFace `WavLMModel` (`microsoft/wavlm-large`, or an
+   offline-safe stand-in) and extracts paired intermediate ("detail") and top ("interface")
+   tokens aligned at 0.25s temporal stride.
 """
 
 from __future__ import annotations
+
+import inspect
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -23,8 +29,42 @@ from host_forensics.config import BackboneConfig, TriSTMoEConfig
 from host_forensics.models.tri_stmoe import TriSTMoEAdapter
 
 
+def _discover_hf_encoder_layers(hf_model: nn.Module, expected_layers: int) -> nn.ModuleList:
+    """Locate the transformer block `nn.ModuleList` across HF DINOv3, DINOv2, ViT, CLIP, and SigLIP."""
+    candidate_paths = (
+        "encoder.layer",               # Dinov2Model, ViTModel
+        "encoder.layers",              # CLIPVisionTransformer, SiglipVisionTransformer
+        "vision_model.encoder.layers", # CLIPVisionModel, SiglipVisionModel
+        "layer",                       # DINOv3ViTModel
+        "layers",                      # Generic / timm-wrapped HF towers
+        "blocks",                      # timm VisionTransformer
+    )
+    for path in candidate_paths:
+        try:
+            sub = hf_model.get_submodule(path)
+            if isinstance(sub, nn.ModuleList) and len(sub) > 0:
+                return sub
+        except AttributeError:
+            continue
+
+    # Fallback: locate the ModuleList matching `expected_layers` (or largest >= 2)
+    best: nn.ModuleList | None = None
+    for _, module in hf_model.named_modules():
+        if isinstance(module, nn.ModuleList) and len(module) >= 2:
+            if len(module) == expected_layers:
+                return module
+            if best is None or len(module) > len(best):
+                best = module
+
+    if best is not None:
+        return best
+    raise ValueError(
+        f"Could not locate transformer block ModuleList inside {type(hf_model).__name__}."
+    )
+
+
 class OrthogonalSVDLinear(nn.Module):
-    """Wraps a frozen `nn.Linear` with principal-subspace-orthogonal low-rank adaptation."""
+    """Wraps a frozen `nn.Linear` with principal-subspace-orthogonal (or standard) low-rank adaptation."""
 
     def __init__(
         self,
@@ -32,6 +72,7 @@ class OrthogonalSVDLinear(nn.Module):
         rank: int = 16,
         principal_rank: int = 64,
         scale: float = 1.0,
+        orthogonal: bool = True,
     ) -> None:
         super().__init__()
         out_features, in_features = base_linear.weight.shape
@@ -39,6 +80,7 @@ class OrthogonalSVDLinear(nn.Module):
         self.out_features = out_features
         self.rank = rank
         self.scale = scale
+        self.orthogonal = orthogonal
 
         # Freeze pretrained weight & bias
         self.weight0 = nn.Parameter(base_linear.weight.detach().clone(), requires_grad=False)
@@ -53,7 +95,7 @@ class OrthogonalSVDLinear(nn.Module):
         kp = min(principal_rank, min(out_features, in_features) - 1)
         with torch.no_grad():
             u, _, vh = torch.linalg.svd(self.weight0.float(), full_matrices=False)
-            u_k = u[:, :kp].contiguous()   # (d_out, kp)
+            u_k = u[:, :kp].contiguous()     # (d_out, kp)
             v_k = vh[:kp, :].T.contiguous()  # (d_in, kp)
 
         self.register_buffer("u_k", u_k, persistent=True)
@@ -63,9 +105,11 @@ class OrthogonalSVDLinear(nn.Module):
         self.lora_b = nn.Parameter(torch.zeros(out_features, rank))
 
     def delta_weight_orthogonal(self) -> torch.Tensor:
-        """Compute Delta W_perp = (I - U_k U_k^T) B A (I - V_k V_k^T)."""
+        """Compute Delta W_perp = (I - U_k U_k^T) B A (I - V_k V_k^T), or unconstrained B A if not orthogonal."""
         a_fp32 = self.lora_a.float()
         b_fp32 = self.lora_b.float()
+        if not self.orthogonal:
+            return (b_fp32 @ a_fp32) * self.scale
         # Project rows of A orthogonal to V_k: A_perp = A - (A V_k) V_k^T
         a_perp = a_fp32 - (a_fp32 @ self.v_k) @ self.v_k.T
         # Project cols of B orthogonal to U_k: B_perp = B - U_k (U_k^T B)
@@ -73,15 +117,23 @@ class OrthogonalSVDLinear(nn.Module):
         return (b_perp @ a_perp) * self.scale
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        base_out = F.linear(x, self.weight0.to(dtype=x.dtype), self.bias0.to(dtype=x.dtype) if self.bias0 is not None else None)
+        bias = self.bias0.to(dtype=x.dtype) if self.bias0 is not None else None
+        base_out = F.linear(x, self.weight0.to(dtype=x.dtype), bias)
         dw = self.delta_weight_orthogonal().to(dtype=x.dtype)
         return base_out + F.linear(x, dw)
 
 
 class _StandInViTBlock(nn.Module):
-    """Frozen Vision Transformer block with optional OrthogonalSVDLinear Q/V adaptation."""
+    """Frozen Vision Transformer block with OrthogonalSVDLinear (or standard LoRA) Q/V adaptation."""
 
-    def __init__(self, dim: int, num_heads: int, use_ortho_lora: bool, lora_rank: int, principal_rank: int) -> None:
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        use_ortho_lora: bool,
+        lora_rank: int,
+        principal_rank: int,
+    ) -> None:
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.num_heads = num_heads
@@ -94,12 +146,12 @@ class _StandInViTBlock(nn.Module):
             for param in p.parameters():
                 param.requires_grad_(False)
 
-        if use_ortho_lora:
-            self.q_proj: nn.Module = OrthogonalSVDLinear(q_lin, rank=lora_rank, principal_rank=principal_rank)
-            self.v_proj: nn.Module = OrthogonalSVDLinear(v_lin, rank=lora_rank, principal_rank=principal_rank)
-        else:
-            self.q_proj = q_lin
-            self.v_proj = v_lin
+        self.q_proj: nn.Module = OrthogonalSVDLinear(
+            q_lin, rank=lora_rank, principal_rank=principal_rank, orthogonal=use_ortho_lora
+        )
+        self.v_proj: nn.Module = OrthogonalSVDLinear(
+            v_lin, rank=lora_rank, principal_rank=principal_rank, orthogonal=use_ortho_lora
+        )
         self.k_proj = k_lin
         self.out_proj = out_lin
 
@@ -126,13 +178,14 @@ class _StandInViTBlock(nn.Module):
 
 
 class MultiPriorVisualBackbone(nn.Module):
-    """Frozen multi-layer ViT backbone (DINOv3 / CLIP or stand-in) coupled with Tri-STMoE adapters."""
+    """Frozen multi-layer ViT backbone (DINOv3 / CLIP or stand-in) coupled with in-stream Tri-STMoE adapters."""
 
     def __init__(
         self,
         cfg: BackboneConfig,
         moe_cfg: TriSTMoEConfig,
         mn_res_dim: int,
+        hf_model: nn.Module | None = None,
     ) -> None:
         super().__init__()
         self.cfg = cfg
@@ -155,26 +208,39 @@ class MultiPriorVisualBackbone(nn.Module):
         self.skip_proj = nn.Linear(cfg.visual_embed_dim, cfg.visual_embed_dim // 2)
 
         self._hf_model: nn.Module | None = None
-        if cfg.visual_backend == "hf":
-            self._init_hf_backbone(cfg)
+        self._hf_accepts_interp_pos: bool = False
+        self._hook_handles: list[Any] = []
+        self._active_forward_ctx: dict[str, Any] | None = None
+
+        if hf_model is not None or cfg.visual_backend == "hf":
+            self._init_hf_backbone(cfg, preloaded_model=hf_model)
         else:
             self._init_standin_backbone(cfg)
 
-    def _init_hf_backbone(self, cfg: BackboneConfig) -> None:
-        from transformers import AutoModel  # Optional dependency (`pip install host-forensics[hub]`)
+    def _init_hf_backbone(
+        self, cfg: BackboneConfig, preloaded_model: nn.Module | None = None
+    ) -> None:
+        if preloaded_model is None:
+            from transformers import AutoModel  # Optional dependency (`pip install host-forensics[hub]`)
 
-        hf_model = AutoModel.from_pretrained(cfg.visual_name)
+            hf_model = AutoModel.from_pretrained(cfg.visual_name)
+        else:
+            hf_model = preloaded_model
+
         for param in hf_model.parameters():
             param.requires_grad_(False)
+        hf_model.eval()
 
-        if cfg.use_ortho_lora:
-            # Wrap query/value linear projections inside encoder blocks with OrthogonalSVDLinear
-            for name, module in list(hf_model.named_modules()):
-                if any(tag in name.lower() for tag in ("q_proj", "query", "v_proj", "value")) and isinstance(
-                    module, nn.Linear
-                ):
+        encoder_layers = _discover_hf_encoder_layers(hf_model, expected_layers=cfg.visual_num_layers)
+
+        # Wrap query/value linear projections strictly inside encoder blocks
+        target_leaf_names = {"q_proj", "query", "v_proj", "value", "qkv"}
+        for block in encoder_layers:
+            for name, module in list(block.named_modules()):
+                leaf = name.rsplit(".", 1)[-1] if "." in name else name
+                if leaf in target_leaf_names and isinstance(module, nn.Linear):
                     parent_path, attr = name.rsplit(".", 1) if "." in name else ("", name)
-                    parent = hf_model.get_submodule(parent_path) if parent_path else hf_model
+                    parent = block.get_submodule(parent_path) if parent_path else block
                     setattr(
                         parent,
                         attr,
@@ -182,9 +248,56 @@ class MultiPriorVisualBackbone(nn.Module):
                             module,
                             rank=cfg.lora_rank,
                             principal_rank=cfg.principal_subspace_rank,
+                            orthogonal=cfg.use_ortho_lora,
                         ),
                     )
+
+        # Register in-stream forward hooks on adapted and tapped transformer blocks (1-indexed)
+        hook_targets = self.adapted_layers | self.tap_layers
+        for layer_idx, block in enumerate(encoder_layers, start=1):
+            if layer_idx in hook_targets:
+                handle = block.register_forward_hook(self._make_block_hook(layer_idx))
+                self._hook_handles.append(handle)
+
+        try:
+            sig = inspect.signature(hf_model.forward)
+            self._hf_accepts_interp_pos = "interpolate_pos_encoding" in sig.parameters
+        except (TypeError, ValueError):
+            self._hf_accepts_interp_pos = False
+
         self._hf_model = hf_model
+
+    def _make_block_hook(self, layer_idx: int) -> Any:
+        def _hook(_module: nn.Module, _args: tuple[Any, ...], output: Any) -> Any:
+            ctx = self._active_forward_ctx
+            if ctx is None:
+                return output
+
+            is_tuple = isinstance(output, tuple)
+            hs: torch.Tensor = output[0] if is_tuple else output
+            b: int = ctx["b"]
+            t: int = ctx["t"]
+            p_expected: int = ctx["p_expected"]
+            res_mn: torch.Tensor = ctx["res_mn"]
+
+            # Separate optional prefix tokens (CLS + DINOv2/v3 register tokens) from P spatial patches
+            prefix = hs[:, :-p_expected, :]
+            patch_hs = hs[:, -p_expected:, :]
+            tokens_btpd = rearrange(patch_hs, "(b t) p d -> b t p d", b=b, t=t)
+
+            if str(layer_idx) in self.moe_adapters:
+                tokens_btpd = self.moe_adapters[str(layer_idx)](tokens_btpd, res_mn)
+                adapted_flat = rearrange(tokens_btpd, "b t p d -> (b t) p d").to(dtype=hs.dtype)
+                hs = torch.cat([prefix, adapted_flat], dim=1)
+
+            if layer_idx in self.tap_layers:
+                ctx["tapped"][layer_idx] = tokens_btpd
+
+            if is_tuple:
+                return (hs, *output[1:])
+            return hs
+
+        return _hook
 
     def _init_standin_backbone(self, cfg: BackboneConfig) -> None:
         self.patch_embed = nn.Conv2d(
@@ -207,6 +320,13 @@ class MultiPriorVisualBackbone(nn.Module):
             ]
         )
 
+    def train(self, mode: bool = True) -> "MultiPriorVisualBackbone":
+        super().train(mode)
+        # Keep frozen pretrained ViT deterministic (disable pretrained DropPath/dropout noise)
+        if self._hf_model is not None:
+            self._hf_model.eval()
+        return self
+
     def forward(
         self, video: torch.Tensor, res_mn: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -222,18 +342,22 @@ class MultiPriorVisualBackbone(nn.Module):
 
         if self._hf_model is not None:
             frames = rearrange(video, "b t c h w -> (b t) c h w")
-            outputs = self._hf_model(pixel_values=frames, output_hidden_states=True)
-            hidden_states = outputs.hidden_states  # tuple of (B*T, seq_len, D)
-            tapped: list[torch.Tensor] = []
-            for layer_idx in range(1, len(hidden_states)):
-                hs = hidden_states[layer_idx]
-                # Strip CLS + optional DINOv3 register tokens to retain trailing P spatial patch tokens
-                patch_hs = hs[:, -p_expected:, :]
-                tokens_btpd = rearrange(patch_hs, "(b t) p d -> b t p d", b=b, t=t)
-                if str(layer_idx) in self.moe_adapters:
-                    tokens_btpd = self.moe_adapters[str(layer_idx)](tokens_btpd, res_mn)
-                if layer_idx in self.tap_layers:
-                    tapped.append(tokens_btpd)
+            ctx: dict[str, Any] = {
+                "b": b,
+                "t": t,
+                "p_expected": p_expected,
+                "res_mn": res_mn,
+                "tapped": {},
+            }
+            self._active_forward_ctx = ctx
+            try:
+                hf_kwargs: dict[str, Any] = {"pixel_values": frames}
+                if self._hf_accepts_interp_pos:
+                    hf_kwargs["interpolate_pos_encoding"] = True
+                self._hf_model(**hf_kwargs)
+                tapped = [ctx["tapped"][idx] for idx in self.tap_layer_list]
+            finally:
+                self._active_forward_ctx = None
         else:
             frames = rearrange(video, "b t c h w -> (b t) c h w")
             x = rearrange(self.patch_embed(frames), "bt d hp wp -> bt (hp wp) d")
@@ -261,78 +385,128 @@ class MultiPriorVisualBackbone(nn.Module):
 class FrozenAudioBackbone(nn.Module):
     """Extracts frozen intermediate ("detail") and top ("interface") audio tokens at 0.25s stride.
 
-    Follows AV-FABLE / NFSR (Oct 2026): reading intermediate perceptual + top interface features
-    recovers >90 AUROC forensic signals that zero-shot AV-LLM text interfaces lose.
+    Follows AV-FABLE / NFSR (2026): reading intermediate perceptual + top interface features from
+    frozen WavLM-Large recovers >90 AUROC forensic signals that zero-shot AV-LLM text prompts lose.
     """
 
-    def __init__(self, cfg: BackboneConfig, out_dim: int = 256) -> None:
+    def __init__(
+        self,
+        cfg: BackboneConfig,
+        out_dim: int = 256,
+        hf_audio_model: nn.Module | None = None,
+    ) -> None:
         super().__init__()
         self.cfg = cfg
         self.out_dim = out_dim
         self.samples_per_step = int(round(cfg.sample_rate * cfg.audio_stride_sec))
 
-        # Frozen stand-in acoustic front-end (can be swapped for HF WavLMModel when `visual_backend=="hf"`)
-        self.frozen_conv = nn.Sequential(
-            nn.Conv1d(1, 128, kernel_size=10, stride=5, padding=3, bias=False),
-            nn.GELU(),
-            nn.Conv1d(128, 256, kernel_size=8, stride=4, padding=2, bias=False),
-            nn.GELU(),
-            nn.Conv1d(256, cfg.audio_embed_dim, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.GELU(),
-        )
-        self.frozen_blocks = nn.ModuleList(
-            [
-                nn.TransformerEncoderLayer(
-                    d_model=cfg.audio_embed_dim,
-                    nhead=8,
-                    dim_feedforward=cfg.audio_embed_dim * 2,
-                    batch_first=True,
-                    norm_first=True,
-                )
-                for _ in range(4)
-            ]
-        )
-        for p in self.frozen_conv.parameters():
-            p.requires_grad_(False)
-        for p in self.frozen_blocks.parameters():
-            p.requires_grad_(False)
+        self._hf_audio_model: nn.Module | None = None
+        audio_feat_dim = cfg.audio_embed_dim
+
+        if hf_audio_model is not None or (cfg.visual_backend == "hf" and bool(cfg.audio_name)):
+            if hf_audio_model is None:
+                from transformers import AutoModel  # Optional dependency (`pip install host-forensics[hub]`)
+
+                hf_aud = AutoModel.from_pretrained(cfg.audio_name)
+            else:
+                hf_aud = hf_audio_model
+
+            for p in hf_aud.parameters():
+                p.requires_grad_(False)
+            hf_aud.eval()
+            audio_feat_dim = int(getattr(getattr(hf_aud, "config", None), "hidden_size", cfg.audio_embed_dim))
+            self._hf_audio_model = hf_aud
+        else:
+            # Offline-safe frozen acoustic stand-in for CI and unit tests
+            self.frozen_conv = nn.Sequential(
+                nn.Conv1d(1, 128, kernel_size=10, stride=5, padding=3, bias=False),
+                nn.GELU(),
+                nn.Conv1d(128, 256, kernel_size=8, stride=4, padding=2, bias=False),
+                nn.GELU(),
+                nn.Conv1d(256, audio_feat_dim, kernel_size=4, stride=2, padding=1, bias=False),
+                nn.GELU(),
+            )
+            self.frozen_blocks = nn.ModuleList(
+                [
+                    nn.TransformerEncoderLayer(
+                        d_model=audio_feat_dim,
+                        nhead=8,
+                        dim_feedforward=audio_feat_dim * 2,
+                        batch_first=True,
+                        norm_first=True,
+                    )
+                    for _ in range(4)
+                ]
+            )
+            for p in self.frozen_conv.parameters():
+                p.requires_grad_(False)
+            for p in self.frozen_blocks.parameters():
+                p.requires_grad_(False)
 
         # Trainable NFSR-style gated detail+interface readout projection -> out_dim
-        self.detail_proj = nn.Linear(cfg.audio_embed_dim, out_dim)
-        self.interface_proj = nn.Linear(cfg.audio_embed_dim, out_dim)
+        self.detail_proj = nn.Linear(audio_feat_dim, out_dim)
+        self.interface_proj = nn.Linear(audio_feat_dim, out_dim)
         self.depth_gate = nn.Sequential(
             nn.Linear(out_dim * 2, out_dim),
             nn.Sigmoid(),
         )
         self.norm = nn.LayerNorm(out_dim)
 
+    def train(self, mode: bool = True) -> "FrozenAudioBackbone":
+        super().train(mode)
+        # Keep frozen WavLM in eval() so layerdrop / feature dropout stays disabled during training
+        if self._hf_audio_model is not None:
+            self._hf_audio_model.eval()
+        return self
+
     def forward(self, waveform: torch.Tensor, target_steps: int | None = None) -> torch.Tensor:
         """Args:
-            waveform: (B, L_a) raw mono waveform at `cfg.sample_rate` (16 kHz)
+            waveform: (B, L_a) or (B, 1, L_a) raw mono waveform at `cfg.sample_rate` (16 kHz)
             target_steps: optional exact number of 0.25s positions N = ceil(T_sec / 0.25)
         Returns:
             audio_tokens: (B, N_a, out_dim)
         """
-        if waveform.ndim == 2:
-            wav_in = waveform.unsqueeze(1)  # (B, 1, L_a)
+        wav_2d = waveform.squeeze(1) if waveform.ndim == 3 else waveform
+        n_steps = target_steps or max(1, int(round(wav_2d.shape[-1] / float(self.samples_per_step))))
+
+        if self._hf_audio_model is not None:
+            with torch.no_grad():
+                # Per-utterance zero-mean unit-variance normalization matching Wav2Vec2FeatureExtractor
+                wav_f32 = wav_2d.float()
+                wav_norm = (wav_f32 - wav_f32.mean(dim=-1, keepdim=True)) / (
+                    wav_f32.std(dim=-1, keepdim=True, unbiased=False) + 1e-5
+                )
+                aud_dtype = next(self._hf_audio_model.parameters()).dtype
+                outputs = self._hf_audio_model(
+                    input_values=wav_norm.to(dtype=aud_dtype),
+                    output_hidden_states=True,
+                )
+                hidden_states = outputs.hidden_states
+                mid_idx = len(hidden_states) // 2
+                mid_raw = hidden_states[mid_idx]  # (B, T_frames, D_a)
+                top_raw = hidden_states[-1]       # (B, T_frames, D_a)
+                mid_feat = F.adaptive_avg_pool1d(
+                    mid_raw.transpose(1, 2), output_size=n_steps
+                ).transpose(1, 2)
+                top_feat = F.adaptive_avg_pool1d(
+                    top_raw.transpose(1, 2), output_size=n_steps
+                ).transpose(1, 2)
         else:
-            wav_in = waveform
+            wav_in = wav_2d.unsqueeze(1)  # (B, 1, L_a)
+            with torch.no_grad():
+                feat = self.frozen_conv(wav_in)  # (B, D_a, L')
+                feat_pooled = F.adaptive_avg_pool1d(feat, output_size=n_steps)  # (B, D_a, N_a)
+                h = feat_pooled.transpose(1, 2)  # (B, N_a, D_a)
+                mid_feat = h
+                for idx, blk in enumerate(self.frozen_blocks):
+                    h = blk(h)
+                    if idx == 1:
+                        mid_feat = h
+                top_feat = h
 
-        n_steps = target_steps or max(1, int(round(wav_in.shape[-1] / float(self.samples_per_step))))
-
-        with torch.no_grad():
-            feat = self.frozen_conv(wav_in)  # (B, D_a, L')
-            feat_pooled = F.adaptive_avg_pool1d(feat, output_size=n_steps)  # (B, D_a, N_a)
-            h = feat_pooled.transpose(1, 2)  # (B, N_a, D_a)
-            mid_feat = h
-            for idx, blk in enumerate(self.frozen_blocks):
-                h = blk(h)
-                if idx == 1:
-                    mid_feat = h
-            top_feat = h
-
-        d_tok = self.detail_proj(mid_feat.to(dtype=self.detail_proj.weight.dtype))
-        u_tok = self.interface_proj(top_feat.to(dtype=self.interface_proj.weight.dtype))
+        proj_dtype = self.detail_proj.weight.dtype
+        d_tok = self.detail_proj(mid_feat.to(dtype=proj_dtype))
+        u_tok = self.interface_proj(top_feat.to(dtype=proj_dtype))
         g = self.depth_gate(torch.cat([d_tok, u_tok], dim=-1))
         fused = g * d_tok + (1.0 - g) * u_tok
         return self.norm(fused)
