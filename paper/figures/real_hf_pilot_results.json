@@ -1,0 +1,622 @@
+{
+  "backbone_visual": "facebook/dino-vits16",
+  "backbone_audio": "microsoft/wavlm-base-plus",
+  "device": "cpu",
+  "variants": [
+    {
+      "slug": "full_host_moe",
+      "label": "HoST-MoE (Full)",
+      "elapsed_sec": 214.6,
+      "parameters": {
+        "total_params": 123392482,
+        "trainable_params": 7197042,
+        "trainable_pct": 5.83
+      },
+      "lora_principal_leakage_fro": 0.0,
+      "moe_expert_load_cv": 0.1732,
+      "calibration": {
+        "visual_thresh": 1.118,
+        "audio_thresh": -1.436
+      },
+      "final_epoch_loss": {
+        "stage": 2,
+        "epoch": 2,
+        "loss_total": 2.6201,
+        "loss_cls": 0.488,
+        "loss_polarization": 0.0199,
+        "loss_anchor": 0.2647,
+        "loss_tfl": 0.4728,
+        "loss_mask": 1.52
+      },
+      "benchmarks": {
+        "CelebDF_v2": {
+          "num_clips": 36,
+          "auroc": 53.09,
+          "eer": 38.89,
+          "domain_cross_auc": 44.29,
+          "domain_pol_w1": 11.41,
+          "mid_acc": 44.44,
+          "mid_f1": 16.67,
+          "realized_far": 22.22,
+          "attribution_4way_acc": 41.67,
+          "tfl": {
+            "v_map": 60.82,
+            "a_map": 0.0,
+            "av_map": 60.82,
+            "v_event_iou": 87.25,
+            "a_event_iou": 0.0
+          },
+          "spatial": {
+            "miou": 25.61,
+            "boundary_f": 6.47,
+            "j_and_f": 16.04
+          }
+        },
+        "GoogleDFD_ZeroShot": {
+          "num_clips": 40,
+          "auroc": 61.0,
+          "eer": 45.0,
+          "domain_cross_auc": 55.78,
+          "domain_pol_w1": 9.32,
+          "mid_acc": 60.0,
+          "mid_f1": 65.22,
+          "realized_far": 55.0,
+          "attribution_4way_acc": 60.0,
+          "tfl": {
+            "v_map": 68.27,
+            "a_map": 0.0,
+            "av_map": 68.27,
+            "v_event_iou": 84.47,
+            "a_event_iou": 0.0
+          }
+        },
+        "InpaintTubelet_Silent": {
+          "num_clips": 30,
+          "auroc": 45.83,
+          "eer": 59.72,
+          "domain_cross_auc": 35.9,
+          "domain_pol_w1": 13.83,
+          "mid_acc": 43.33,
+          "mid_f1": 26.09,
+          "realized_far": 16.67,
+          "attribution_4way_acc": 43.33,
+          "tfl": {
+            "v_map": 44.82,
+            "a_map": 0.0,
+            "av_map": 44.82,
+            "v_event_iou": 68.75,
+            "a_event_iou": 0.0
+          },
+          "spatial": {
+            "miou": 10.2,
+            "boundary_f": 2.28,
+            "j_and_f": 6.24
+          }
+        },
+        "AV_Splice_Eval": {
+          "num_clips": 32,
+          "auroc": 89.58,
+          "eer": 25.0,
+          "domain_cross_auc": 73.86,
+          "domain_pol_w1": 18.88,
+          "mid_acc": 78.12,
+          "mid_f1": 84.44,
+          "realized_far": 25.0,
+          "attribution_4way_acc": 50.0,
+          "tfl": {
+            "v_map": 74.86,
+            "a_map": 97.95,
+            "av_map": 86.41,
+            "v_event_iou": 81.15,
+            "a_event_iou": 82.64
+          },
+          "spatial": {
+            "miou": 21.79,
+            "boundary_f": 5.12,
+            "j_and_f": 13.45
+          }
+        }
+      },
+      "cross_benchmark": {
+        "mean_within_auc": 62.38,
+        "pooled_mixed_auc": 61.91,
+        "cross_auc": 48.49,
+        "polarization_w1": 22.27,
+        "pooled_mid_acc": 56.52,
+        "pooled_realized_far": 32.76
+      }
+    },
+    {
+      "slug": "abl_a1_standard_lora",
+      "label": "w/o Ortho SVD-LoRA (Std. LoRA)",
+      "elapsed_sec": 218.8,
+      "parameters": {
+        "total_params": 123392482,
+        "trainable_params": 7197042,
+        "trainable_pct": 5.83
+      },
+      "lora_principal_leakage_fro": 0.054988,
+      "moe_expert_load_cv": 0.222,
+      "calibration": {
+        "visual_thresh": 1.7515,
+        "audio_thresh": -1.702
+      },
+      "final_epoch_loss": {
+        "stage": 2,
+        "epoch": 2,
+        "loss_total": 2.404,
+        "loss_cls": 0.3043,
+        "loss_polarization": 0.0271,
+        "loss_anchor": 0.2591,
+        "loss_tfl": 0.4405,
+        "loss_mask": 1.5202
+      },
+      "benchmarks": {
+        "CelebDF_v2": {
+          "num_clips": 36,
+          "auroc": 57.1,
+          "eer": 38.89,
+          "domain_cross_auc": 46.67,
+          "domain_pol_w1": 14.57,
+          "mid_acc": 47.22,
+          "mid_f1": 24.0,
+          "realized_far": 22.22,
+          "attribution_4way_acc": 41.67,
+          "tfl": {
+            "v_map": 64.75,
+            "a_map": 0.0,
+            "av_map": 64.75,
+            "v_event_iou": 80.56,
+            "a_event_iou": 0.0
+          },
+          "spatial": {
+            "miou": 25.8,
+            "boundary_f": 6.01,
+            "j_and_f": 15.91
+          }
+        },
+        "GoogleDFD_ZeroShot": {
+          "num_clips": 40,
+          "auroc": 64.0,
+          "eer": 50.0,
+          "domain_cross_auc": 59.15,
+          "domain_pol_w1": 5.17,
+          "mid_acc": 52.5,
+          "mid_f1": 51.28,
+          "realized_far": 45.0,
+          "attribution_4way_acc": 52.5,
+          "tfl": {
+            "v_map": 65.31,
+            "a_map": 0.0,
+            "av_map": 65.31,
+            "v_event_iou": 90.22,
+            "a_event_iou": 0.0
+          }
+        },
+        "InpaintTubelet_Silent": {
+          "num_clips": 30,
+          "auroc": 43.06,
+          "eer": 50.0,
+          "domain_cross_auc": 40.23,
+          "domain_pol_w1": 6.57,
+          "mid_acc": 43.33,
+          "mid_f1": 41.38,
+          "realized_far": 41.67,
+          "attribution_4way_acc": 43.33,
+          "tfl": {
+            "v_map": 38.26,
+            "a_map": 0.0,
+            "av_map": 38.26,
+            "v_event_iou": 67.05,
+            "a_event_iou": 0.0
+          },
+          "spatial": {
+            "miou": 11.18,
+            "boundary_f": 2.55,
+            "j_and_f": 6.86
+          }
+        },
+        "AV_Splice_Eval": {
+          "num_clips": 32,
+          "auroc": 84.38,
+          "eer": 25.0,
+          "domain_cross_auc": 72.58,
+          "domain_pol_w1": 15.71,
+          "mid_acc": 75.0,
+          "mid_f1": 82.61,
+          "realized_far": 37.5,
+          "attribution_4way_acc": 46.88,
+          "tfl": {
+            "v_map": 64.56,
+            "a_map": 97.53,
+            "av_map": 81.05,
+            "v_event_iou": 78.06,
+            "a_event_iou": 82.11
+          },
+          "spatial": {
+            "miou": 22.91,
+            "boundary_f": 5.3,
+            "j_and_f": 14.1
+          }
+        }
+      },
+      "cross_benchmark": {
+        "mean_within_auc": 62.13,
+        "pooled_mixed_auc": 63.1,
+        "cross_auc": 49.75,
+        "polarization_w1": 19.94,
+        "pooled_mid_acc": 54.35,
+        "pooled_realized_far": 36.21
+      }
+    },
+    {
+      "slug": "abl_a2_no_bias_balance",
+      "label": "w/o Bias-Balanced MoE Routing",
+      "elapsed_sec": 219.2,
+      "parameters": {
+        "total_params": 123392482,
+        "trainable_params": 7197042,
+        "trainable_pct": 5.83
+      },
+      "lora_principal_leakage_fro": 0.0,
+      "moe_expert_load_cv": 0.5569,
+      "calibration": {
+        "visual_thresh": 0.4993,
+        "audio_thresh": -1.5378
+      },
+      "final_epoch_loss": {
+        "stage": 2,
+        "epoch": 2,
+        "loss_total": 2.8984,
+        "loss_cls": 0.7645,
+        "loss_polarization": 0.0062,
+        "loss_anchor": 0.2575,
+        "loss_tfl": 0.5068,
+        "loss_mask": 1.4962
+      },
+      "benchmarks": {
+        "CelebDF_v2": {
+          "num_clips": 36,
+          "auroc": 58.02,
+          "eer": 38.89,
+          "domain_cross_auc": 51.73,
+          "domain_pol_w1": 12.71,
+          "mid_acc": 44.44,
+          "mid_f1": 9.09,
+          "realized_far": 16.67,
+          "attribution_4way_acc": 44.44,
+          "tfl": {
+            "v_map": 73.15,
+            "a_map": 0.0,
+            "av_map": 73.15,
+            "v_event_iou": 89.92,
+            "a_event_iou": 0.0
+          },
+          "spatial": {
+            "miou": 25.94,
+            "boundary_f": 7.18,
+            "j_and_f": 16.56
+          }
+        },
+        "GoogleDFD_ZeroShot": {
+          "num_clips": 40,
+          "auroc": 52.5,
+          "eer": 45.0,
+          "domain_cross_auc": 49.64,
+          "domain_pol_w1": 4.81,
+          "mid_acc": 55.0,
+          "mid_f1": 62.5,
+          "realized_far": 65.0,
+          "attribution_4way_acc": 55.0,
+          "tfl": {
+            "v_map": 69.52,
+            "a_map": 0.0,
+            "av_map": 69.52,
+            "v_event_iou": 86.59,
+            "a_event_iou": 0.0
+          }
+        },
+        "InpaintTubelet_Silent": {
+          "num_clips": 30,
+          "auroc": 48.15,
+          "eer": 50.0,
+          "domain_cross_auc": 39.58,
+          "domain_pol_w1": 13.64,
+          "mid_acc": 50.0,
+          "mid_f1": 48.28,
+          "realized_far": 33.33,
+          "attribution_4way_acc": 50.0,
+          "tfl": {
+            "v_map": 40.61,
+            "a_map": 0.0,
+            "av_map": 40.61,
+            "v_event_iou": 64.66,
+            "a_event_iou": 0.0
+          },
+          "spatial": {
+            "miou": 10.81,
+            "boundary_f": 2.34,
+            "j_and_f": 6.57
+          }
+        },
+        "AV_Splice_Eval": {
+          "num_clips": 32,
+          "auroc": 82.29,
+          "eer": 25.0,
+          "domain_cross_auc": 68.9,
+          "domain_pol_w1": 17.32,
+          "mid_acc": 71.88,
+          "mid_f1": 79.07,
+          "realized_far": 25.0,
+          "attribution_4way_acc": 43.75,
+          "tfl": {
+            "v_map": 79.46,
+            "a_map": 98.39,
+            "av_map": 88.93,
+            "v_event_iou": 83.52,
+            "a_event_iou": 81.78
+          },
+          "spatial": {
+            "miou": 21.73,
+            "boundary_f": 5.37,
+            "j_and_f": 13.55
+          }
+        }
+      },
+      "cross_benchmark": {
+        "mean_within_auc": 60.24,
+        "pooled_mixed_auc": 59.25,
+        "cross_auc": 44.42,
+        "polarization_w1": 26.27,
+        "pooled_mid_acc": 55.07,
+        "pooled_realized_far": 37.93
+      }
+    },
+    {
+      "slug": "abl_a3_no_depolarization",
+      "label": "w/o Host Depolarization & Anchor",
+      "elapsed_sec": 217.6,
+      "parameters": {
+        "total_params": 123392482,
+        "trainable_params": 7197042,
+        "trainable_pct": 5.83
+      },
+      "lora_principal_leakage_fro": 0.0,
+      "moe_expert_load_cv": 0.2667,
+      "calibration": {
+        "visual_thresh": 1.0784,
+        "audio_thresh": -1.739
+      },
+      "final_epoch_loss": {
+        "stage": 2,
+        "epoch": 2,
+        "loss_total": 1.9644,
+        "loss_cls": 0.1842,
+        "loss_polarization": 0.0379,
+        "loss_anchor": 0.803,
+        "loss_tfl": 0.3953,
+        "loss_mask": 1.385
+      },
+      "benchmarks": {
+        "CelebDF_v2": {
+          "num_clips": 36,
+          "auroc": 56.79,
+          "eer": 38.89,
+          "domain_cross_auc": 51.18,
+          "domain_pol_w1": 10.85,
+          "mid_acc": 44.44,
+          "mid_f1": 33.33,
+          "realized_far": 38.89,
+          "attribution_4way_acc": 44.44,
+          "tfl": {
+            "v_map": 50.47,
+            "a_map": 0.0,
+            "av_map": 50.47,
+            "v_event_iou": 93.16,
+            "a_event_iou": 0.0
+          },
+          "spatial": {
+            "miou": 31.13,
+            "boundary_f": 10.87,
+            "j_and_f": 21.0
+          }
+        },
+        "GoogleDFD_ZeroShot": {
+          "num_clips": 40,
+          "auroc": 49.75,
+          "eer": 55.0,
+          "domain_cross_auc": 42.82,
+          "domain_pol_w1": 13.08,
+          "mid_acc": 50.0,
+          "mid_f1": 58.33,
+          "realized_far": 70.0,
+          "attribution_4way_acc": 50.0,
+          "tfl": {
+            "v_map": 65.59,
+            "a_map": 0.0,
+            "av_map": 65.59,
+            "v_event_iou": 98.97,
+            "a_event_iou": 0.0
+          }
+        },
+        "InpaintTubelet_Silent": {
+          "num_clips": 30,
+          "auroc": 48.61,
+          "eer": 50.0,
+          "domain_cross_auc": 43.97,
+          "domain_pol_w1": 12.05,
+          "mid_acc": 50.0,
+          "mid_f1": 51.61,
+          "realized_far": 41.67,
+          "attribution_4way_acc": 50.0,
+          "tfl": {
+            "v_map": 30.43,
+            "a_map": 0.0,
+            "av_map": 30.43,
+            "v_event_iou": 67.55,
+            "a_event_iou": 0.0
+          },
+          "spatial": {
+            "miou": 12.46,
+            "boundary_f": 2.49,
+            "j_and_f": 7.47
+          }
+        },
+        "AV_Splice_Eval": {
+          "num_clips": 32,
+          "auroc": 89.06,
+          "eer": 25.0,
+          "domain_cross_auc": 75.88,
+          "domain_pol_w1": 15.52,
+          "mid_acc": 84.38,
+          "mid_f1": 89.8,
+          "realized_far": 37.5,
+          "attribution_4way_acc": 53.12,
+          "tfl": {
+            "v_map": 60.82,
+            "a_map": 96.55,
+            "av_map": 78.69,
+            "v_event_iou": 82.46,
+            "a_event_iou": 80.45
+          },
+          "spatial": {
+            "miou": 26.51,
+            "boundary_f": 8.3,
+            "j_and_f": 17.41
+          }
+        }
+      },
+      "cross_benchmark": {
+        "mean_within_auc": 61.05,
+        "pooled_mixed_auc": 61.62,
+        "cross_auc": 48.45,
+        "polarization_w1": 20.64,
+        "pooled_mid_acc": 56.52,
+        "pooled_realized_far": 50.0
+      }
+    },
+    {
+      "slug": "abl_a4_no_sym_laundering",
+      "label": "w/o Symmetric Laundering",
+      "elapsed_sec": 213.4,
+      "parameters": {
+        "total_params": 123392482,
+        "trainable_params": 7197042,
+        "trainable_pct": 5.83
+      },
+      "lora_principal_leakage_fro": 0.0,
+      "moe_expert_load_cv": 0.2542,
+      "calibration": {
+        "visual_thresh": 1.693,
+        "audio_thresh": -1.8063
+      },
+      "final_epoch_loss": {
+        "stage": 2,
+        "epoch": 2,
+        "loss_total": 2.2734,
+        "loss_cls": 0.197,
+        "loss_polarization": 0.0026,
+        "loss_anchor": 0.2653,
+        "loss_tfl": 0.4267,
+        "loss_mask": 1.5161
+      },
+      "benchmarks": {
+        "CelebDF_v2": {
+          "num_clips": 36,
+          "auroc": 59.88,
+          "eer": 38.89,
+          "domain_cross_auc": 47.63,
+          "domain_pol_w1": 17.03,
+          "mid_acc": 52.78,
+          "mid_f1": 45.16,
+          "realized_far": 33.33,
+          "attribution_4way_acc": 52.78,
+          "tfl": {
+            "v_map": 54.84,
+            "a_map": 0.0,
+            "av_map": 54.84,
+            "v_event_iou": 94.38,
+            "a_event_iou": 0.0
+          },
+          "spatial": {
+            "miou": 25.22,
+            "boundary_f": 6.27,
+            "j_and_f": 15.74
+          }
+        },
+        "GoogleDFD_ZeroShot": {
+          "num_clips": 40,
+          "auroc": 56.75,
+          "eer": 45.0,
+          "domain_cross_auc": 47.33,
+          "domain_pol_w1": 10.99,
+          "mid_acc": 57.5,
+          "mid_f1": 56.41,
+          "realized_far": 40.0,
+          "attribution_4way_acc": 57.5,
+          "tfl": {
+            "v_map": 55.25,
+            "a_map": 0.0,
+            "av_map": 55.25,
+            "v_event_iou": 98.89,
+            "a_event_iou": 0.0
+          }
+        },
+        "InpaintTubelet_Silent": {
+          "num_clips": 30,
+          "auroc": 53.7,
+          "eer": 43.06,
+          "domain_cross_auc": 45.92,
+          "domain_pol_w1": 15.22,
+          "mid_acc": 56.67,
+          "mid_f1": 58.06,
+          "realized_far": 33.33,
+          "attribution_4way_acc": 56.67,
+          "tfl": {
+            "v_map": 40.23,
+            "a_map": 0.0,
+            "av_map": 40.23,
+            "v_event_iou": 65.27,
+            "a_event_iou": 0.0
+          },
+          "spatial": {
+            "miou": 10.7,
+            "boundary_f": 2.54,
+            "j_and_f": 6.62
+          }
+        },
+        "AV_Splice_Eval": {
+          "num_clips": 32,
+          "auroc": 90.62,
+          "eer": 25.0,
+          "domain_cross_auc": 77.46,
+          "domain_pol_w1": 16.06,
+          "mid_acc": 84.38,
+          "mid_f1": 89.36,
+          "realized_far": 25.0,
+          "attribution_4way_acc": 59.38,
+          "tfl": {
+            "v_map": 62.55,
+            "a_map": 97.03,
+            "av_map": 79.79,
+            "v_event_iou": 83.61,
+            "a_event_iou": 80.29
+          },
+          "spatial": {
+            "miou": 22.08,
+            "boundary_f": 4.94,
+            "j_and_f": 13.51
+          }
+        }
+      },
+      "cross_benchmark": {
+        "mean_within_auc": 65.24,
+        "pooled_mixed_auc": 65.41,
+        "cross_auc": 52.84,
+        "polarization_w1": 19.0,
+        "pooled_mid_acc": 62.32,
+        "pooled_realized_far": 34.48
+      }
+    }
+  ]
+}

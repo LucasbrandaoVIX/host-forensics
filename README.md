@@ -31,21 +31,25 @@ Unlike whole-video synthetic T2V detectors, **HoST-MoE** exploits the foundation
 host-forensics/
 ├── configs/
 │   ├── rtx5090_unified_train.yaml   # Full DINOv3-L + WavLM BF16 config for 1x-8x RTX 5090 / H100
+│   ├── hf_real_pilot.yaml           # Open-weights DINO-ViT-S/16 + WavLM-Base+ real-media pilot config
 │   └── smoke_cpu_or_ci.yaml         # Compact offline-safe config for instant CI & smoke tests
 ├── docs/
 │   ├── literature_review_and_mitigation_matrix.md  # 2018-2026 survey & 8-family mitigation matrix
 │   ├── mathematical_and_architectural_spec.md      # Full equations, Proposition 1 proof & VRAM table
-│   └── empirical_verification_results.md           # Executed PoC verification tables & insights
+│   └── empirical_verification_results.md           # Executed PoC + real-HF foundation pilot results
 ├── paper/
 │   ├── main.tex                     # Two-column CVPR/NeurIPS research manuscript (TikZ + PGFPlots)
 │   ├── references.bib               # Verified 2012-2026 forensic bibliography
-│   ├── main.pdf                     # Compiled 7-page camera-ready research PDF
-│   └── figures/poc_results.json     # Executed empirical mechanism verification metrics
+│   ├── main.pdf                     # Compiled camera-ready research PDF
+│   ├── tables/real_hf_pilot_table.tex              # Auto-generated 5-variant real-media benchmark table
+│   └── figures/                     # poc_results.json & real_hf_pilot_results.json
 ├── scripts/
 │   ├── prepare_manifests.py         # Multi-benchmark FFmpeg video/audio/mask -> .pt + .jsonl builder
 │   ├── evaluate_benchmarks.py       # Zero-shot Cross-AUC, MID-FFD, AV-mAP, J&F & LaTeX table exporter
 │   ├── run_poc_experiments.py       # Reproducible CPU empirical verification of SHDC, MoE & MN-Stem
-│   └── run_rtx5090_suite.sh         # Turnkey 1x/Nx-GPU Stage-1/Stage-2 training, eval & ablation runner
+│   ├── run_real_hf_pilot.py         # End-to-end real HF foundation-backbone pilot & 5-variant ablation
+│   ├── run_rtx5090_suite.sh         # Turnkey 1x/Nx-GPU Stage-1/Stage-2 training, eval & ablation runner
+│   └── cloud_gpu_bootstrap.sh       # One-command RunPod / Lambda / Vast.ai / bare-metal GPU bootstrapper
 ├── src/host_forensics/
 │   ├── config.py                    # Typed dataclasses & YAML serialization
 │   ├── cli.py                       # `host-detect` CLI (info, smoke-train, train, infer, dump-config)
@@ -81,22 +85,28 @@ host-forensics/
 ```bash
 uv venv .venv --python 3.11
 uv pip install --python .venv/bin/python -e ".[dev]"
-# On your GPU workstation with HuggingFace Hub access for DINOv3-L & WavLM-Large:
-uv pip install --python .venv/bin/python -e ".[hub,dev]"
+# With HuggingFace Hub access for pretrained foundation backbones & datasets:
+uv pip install --python .venv/bin/python -e ".[hub,dev]" huggingface_hub
 ```
 
-### 2. Run Unit Tests, Smoke Verification & Empirical PoC Suite
+### 2. Run Unit Tests, Mechanism PoC & Real HuggingFace Foundation Pilot
 
 ```bash
 .venv/bin/pytest -v
 .venv/bin/host-detect smoke-train --epochs 2
 .venv/bin/python scripts/run_poc_experiments.py
+
+# End-to-end pretrained DINO-ViT-S/16 + WavLM-Base+ pilot & 5-variant ablation on real HF video/audio:
+HF_HUB_DISABLE_XET=1 .venv/bin/python scripts/run_real_hf_pilot.py
 ```
 
 ### 3. Prepare Raw Video Benchmarks & Run Single- or Multi-GPU Training Suite
 
 ```bash
-# Convert raw benchmark folder (generic, df40, manivid, av_deepfake1m, av_fable) into .pt + .jsonl
+# One-command Cloud GPU (RunPod / Lambda / Vast.ai / bare-metal RTX 5090 & H100) bootstrapper:
+HF_TOKEN=hf_xxx DATA_ROOT=/workspace/forensics bash scripts/cloud_gpu_bootstrap.sh
+
+# Or convert a raw benchmark folder manually (generic, df40, manivid, av_deepfake1m, av_fable) into .pt + .jsonl
 .venv/bin/python scripts/prepare_manifests.py \
   --dataset-type manivid \
   --input-root /data/forensics/raw/ManiVid-38K \

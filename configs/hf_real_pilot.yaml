@@ -1,0 +1,80 @@
+backbone:
+  visual_name: facebook/dino-vits16
+  visual_backend: hf
+  img_size: 192
+  patch_size: 16
+  visual_embed_dim: 384
+  visual_num_layers: 12
+  tap_layers: [3, 6, 9, 12]
+  adapted_layers: [3, 6, 9, 12]
+  use_ortho_lora: true
+  lora_rank: 8
+  principal_subspace_rank: 32
+  audio_name: microsoft/wavlm-base-plus
+  audio_embed_dim: 768
+  audio_stride_sec: 0.25
+  sample_rate: 16000
+
+mn_stem:
+  bayar_channels: 8
+  srm_channels: 9
+  shallow_feat_channels: 24
+  corr_radius: 1
+  corr_temperature: 0.1
+  out_dim: 96
+
+moe:
+  bottleneck_dim: 96
+  num_experts_per_pool: 4
+  top_k: 2
+  num_heads: 4
+  dropout: 0.05
+  bias_update_rate: 0.005
+
+shdc:
+  anchor_hidden_dim: 128
+  sharpening_beta: 2.0
+  eps: 1.0e-5
+
+readout:
+  hidden_dim: 192
+  pyramid_levels: 3
+  pyramid_kernel_size: 3
+  soft_nms_sigma: 0.5
+  max_proposals: 12
+  mask_base_channels: 64
+  default_far_budget: 0.05
+
+loss:
+  lambda_cls: 1.0
+  lambda_polarization: 0.35
+  lambda_anchor: 0.50
+  lambda_tfl_focal: 1.0
+  lambda_tfl_diou: 1.0
+  lambda_mask_bce: 1.0
+  lambda_mask_dice: 1.0
+  lambda_mask_boundary: 0.5
+  mil_top_host_ratio: 0.25
+  mil_bottom_fake_ratio: 0.10
+  mil_margin: 0.60
+
+train:
+  precision: fp32
+  batch_size: 4
+  eval_batch_size: 8
+  grad_accum_steps: 1
+  num_frames: 6
+  clip_duration_sec: 2.0
+  lr: 5.0e-4
+  weight_decay: 5.0e-4
+  epochs_stage1: 6
+  epochs_stage2_highres: 2
+  highres_img_size: 224
+  modality_dropout_prob: 0.25
+  compound_degradation_prob: 0.50
+  symmetric_laundering_prob: 0.25
+  grad_clip_norm: 1.0
+  num_workers: 0
+  pin_memory: false
+  prefetch_factor: 2
+  compile_model: false

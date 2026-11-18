@@ -210,7 +210,9 @@ class HeterogeneousForensicLoss(nn.Module):
         pred_v = mask_logits[valid].float()  # (B_v, T, H, W)
         gt_v = gt_masks[valid].float()
 
-        loss_bce = F.binary_cross_entropy_with_logits(pred_v, gt_v)
+        fg_ratio = gt_v.mean().detach().clamp(min=0.02, max=0.50)
+        pos_w = ((1.0 - fg_ratio) / fg_ratio).clamp(min=1.0, max=12.0)
+        loss_bce = F.binary_cross_entropy_with_logits(pred_v, gt_v, pos_weight=pos_w)
 
         probs = torch.sigmoid(pred_v)
         probs_flat = probs.reshape(probs.shape[0], -1)

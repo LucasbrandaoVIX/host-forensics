@@ -17,6 +17,7 @@ Implements:
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import inspect
 from typing import Any
 
@@ -27,6 +28,8 @@ from einops import rearrange
 
 from host_forensics.config import BackboneConfig, TriSTMoEConfig
 from host_forensics.models.tri_stmoe import TriSTMoEAdapter
+
+_WAVLM_FROZEN_CACHE: OrderedDict[tuple[str, int, bytes], tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
 
 
 def _discover_hf_encoder_layers(hf_model: nn.Module, expected_layers: int) -> nn.ModuleList:
@@ -501,26 +504,57 @@ class FrozenAudioBackbone(nn.Module):
 
         if self._hf_audio_model is not None:
             with torch.no_grad():
-                # Per-utterance zero-mean unit-variance normalization matching Wav2Vec2FeatureExtractor
-                wav_f32 = wav_2d.float()
-                wav_norm = (wav_f32 - wav_f32.mean(dim=-1, keepdim=True)) / (
-                    wav_f32.std(dim=-1, keepdim=True, unbiased=False) + 1e-5
-                )
-                aud_dtype = next(self._hf_audio_model.parameters()).dtype
-                outputs = self._hf_audio_model(
-                    input_values=wav_norm.to(dtype=aud_dtype),
-                    output_hidden_states=True,
-                )
-                hidden_states = outputs.hidden_states
-                mid_idx = len(hidden_states) // 2
-                mid_raw = hidden_states[mid_idx]  # (B, T_frames, D_a)
-                top_raw = hidden_states[-1]       # (B, T_frames, D_a)
-                mid_feat = F.adaptive_avg_pool1d(
-                    mid_raw.transpose(1, 2), output_size=n_steps
-                ).transpose(1, 2)
-                top_feat = F.adaptive_avg_pool1d(
-                    top_raw.transpose(1, 2), output_size=n_steps
-                ).transpose(1, 2)
+                mid_list: list[torch.Tensor | None] = [None] * wav_2d.shape[0]
+                top_list: list[torch.Tensor | None] = [None] * wav_2d.shape[0]
+                uncached_indices: list[int] = []
+                uncached_keys: list[tuple[str, int, bytes]] = []
+                model_id = str(getattr(self.cfg, "audio_name", "wavlm"))
+
+                for bi in range(wav_2d.shape[0]):
+                    # Fast 64-sample strided fingerprint + L1 energy for exact waveform lookup
+                    w_cpu = wav_2d[bi].detach().float().cpu()
+                    stride = max(1, w_cpu.numel() // 64)
+                    sig = torch.cat([w_cpu[::stride][:64], w_cpu.abs().mean().view(1)]).numpy().tobytes()
+                    ckey = (model_id, n_steps, sig)
+                    cached = _WAVLM_FROZEN_CACHE.get(ckey)
+                    if cached is not None:
+                        _WAVLM_FROZEN_CACHE.move_to_end(ckey)
+                        mid_list[bi] = cached[0].to(device=wav_2d.device)
+                        top_list[bi] = cached[1].to(device=wav_2d.device)
+                    else:
+                        uncached_indices.append(bi)
+                        uncached_keys.append(ckey)
+
+                if uncached_indices:
+                    sub_wav = wav_2d[uncached_indices].float()
+                    wav_norm = (sub_wav - sub_wav.mean(dim=-1, keepdim=True)) / (
+                        sub_wav.std(dim=-1, keepdim=True, unbiased=False) + 1e-5
+                    )
+                    aud_dtype = next(self._hf_audio_model.parameters()).dtype
+                    outputs = self._hf_audio_model(
+                        input_values=wav_norm.to(dtype=aud_dtype),
+                        output_hidden_states=True,
+                    )
+                    hidden_states = outputs.hidden_states
+                    mid_idx = len(hidden_states) // 2
+                    mid_sub = F.adaptive_avg_pool1d(
+                        hidden_states[mid_idx].transpose(1, 2), output_size=n_steps
+                    ).transpose(1, 2)
+                    top_sub = F.adaptive_avg_pool1d(
+                        hidden_states[-1].transpose(1, 2), output_size=n_steps
+                    ).transpose(1, 2)
+
+                    for local_j, (bi, ckey) in enumerate(zip(uncached_indices, uncached_keys)):
+                        m_j = mid_sub[local_j]
+                        t_j = top_sub[local_j]
+                        mid_list[bi] = m_j
+                        top_list[bi] = t_j
+                        _WAVLM_FROZEN_CACHE[ckey] = (m_j.detach().float().cpu(), t_j.detach().float().cpu())
+                        if len(_WAVLM_FROZEN_CACHE) > 768:
+                            _WAVLM_FROZEN_CACHE.popitem(last=False)
+
+                mid_feat = torch.stack(mid_list, dim=0)  # type: ignore[arg-type]
+                top_feat = torch.stack(top_list, dim=0)  # type: ignore[arg-type]
         else:
             wav_in = wav_2d.unsqueeze(1)  # (B, 1, L_a)
             with torch.no_grad():
@@ -540,3 +574,4 @@ class FrozenAudioBackbone(nn.Module):
         g = self.depth_gate(torch.cat([d_tok, u_tok], dim=-1))
         fused = g * d_tok + (1.0 - g) * u_tok
         return self.norm(fused)
+

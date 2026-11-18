@@ -369,6 +369,19 @@ Table~\ref{tab:main_bench} situates HoST-MoE against the major 2023--2026 baseli
 
 To ensure rigorous empirical attribution during full-scale RTX 5090 training (Table~\ref{tab:vram}), \texttt{scripts/run\_rtx5090\_suite.sh} executes a two-stage curriculum ($10$ epochs at $384^2$ followed by $4$ high-resolution boundary/interval refinement epochs at $448^2$ with frozen SVD-LoRA) and automatically generates four controlled ablation configurations: (A1) standard unconstrained LoRA ($\Delta\mathbf{W}$ without orthogonal SVD projection), (A2) disabling auxiliary-loss-free bias updates ($\gamma=0$), (A3) ablating host de-polarization and anchor supervision ($\lambda_{\text{pol}}=\lambda_{\text{anc}}=0$), and (A4) removing symmetric restoration laundering ($p_{\text{launder}}=0$), measuring false-positive inflation on authentic CodeFormer-enhanced videos~\cite{zhou2022codeformer}.
 
+\input{tables/real_hf_pilot_table}
+
+\subsection{Real-Media Foundation Pilot \& Five-Variant Ablation}
+\label{subsec:real_pilot}
+Prior to multi-week corpus training, we validate the end-to-end training, pristine quantile calibration, and zero-shot multi-domain evaluation pipeline on $524$ open-access real and manipulated video/speech recordings (\texttt{Celeb-DF-v2}~\cite{li2020celeb}, \texttt{YouTube-real}, unseen \texttt{Google DFD}, and TTS/voice-cloned speech) using frozen \texttt{facebook/dino-vits16} + \texttt{microsoft/wavlm-base-plus}~\cite{chen2022wavlm} ($123.4$M total parameters, $7.20$M [$5.83\%$] trainable; \texttt{scripts/run\_real\_hf\_pilot.py}). Training on just $64$ identity-disjoint Stage-1 clips ($6$ epochs at $192^2$) and $28$ Stage-2 clips ($2$ epochs at $224^2$) with a single pristine-calibrated threshold ($\alpha=0.05$) yields the five-variant results in Table~\ref{tab:real_hf_pilot}:
+\begin{itemize}[leftmargin=*,nosep]
+    \item \textbf{Multi-Modal Detection \& Grounding:} Full HoST-MoE attains $\mathbf{89.6\%}$ AUROC and $\mathbf{86.4\%}$ native-track AV-mAP ($74.9\%$ V-mAP, $98.0\%$ A-mAP) on asymmetric \texttt{AV-Splice}, $25.6\%$ zero-shot facial mask mIoU on \texttt{Celeb-DF-v2}, and $\mathbf{61.0\%}$ unseen zero-shot AUROC ($55.8\%$ multi-domain Cross-AUC) on \texttt{Google DFD}.
+    \item \textbf{Orthogonal SVD-LoRA (A1):} Enforces exact $\|\mathbf{U}_k^\top\Delta\mathbf{W}\|_F = 0.0000$ vs.\ $0.0550$ under unconstrained LoRA~\cite{yan2025effort}, improving \texttt{AV-Splice} AUROC by $+5.2$ points ($89.6\%$ vs.\ $84.4\%$), visual V-mAP by $+10.3$ points ($74.9\%$ vs.\ $64.6\%$), and lowering pooled realized FAR ($32.8\%$ vs.\ $36.2\%$).
+    \item \textbf{Auxiliary-Loss-Free Bias Balancing (A2):} Removing router bias updates ($\gamma=0$)~\cite{deepseek2024v3} triples expert load imbalance ($\text{CV}: 0.1732 \to 0.5569$), degrading zero-shot \texttt{Google DFD} AUROC by $-8.5$ points ($61.0\% \to 52.5\%$) and \texttt{AV-Splice} AUROC by $-7.3$ points.
+    \item \textbf{Host De-Polarization \& Anchor Supervision (A3):} Removing $\mathcal{L}_{\text{pol}}$ and $\mathcal{L}_{\text{anc}}$~\cite{nguyen2026whenaucmisleads} collapses unseen \texttt{Google DFD} to chance ($49.8\%$ AUROC, $42.8\%$ Cross-AUC), inflates pooled realized FAR from $32.8\%$ to $50.0\%$ ($70.0\%$ on \texttt{Google DFD}), and drops AV-mAP by $-7.7$ points ($86.4\% \to 78.7\%$).
+    \item \textbf{Symmetric Laundering Trade-Off (A4):} Disabling symmetric laundering ($p_{\text{launder}}=0$) inflates in-domain \texttt{Celeb-DF-v2} AUROC via sharpness shortcuts ($59.9\%$) at the expense of worse \texttt{Celeb-DF-v2} polarization ($W_1: 11.4 \to 17.0$), $-4.2$ points lower zero-shot \texttt{Google DFD} AUROC ($56.8\%$, $47.3\%$ Cross-AUC), and $-6.6$ points lower AV-mAP ($79.8\%$).
+\end{itemize}
+
 % =========================================================================
 \section{Limitations, Ethics \& Conclusion}
 \label{sec:conclusion}

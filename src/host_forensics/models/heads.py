@@ -109,15 +109,19 @@ def temporal_soft_nms_1d(
     score_thresh: float = 0.05,
 ) -> list[tuple[float, float, float]]:
     """Vectorized 1D Gaussian Soft-NMS over candidate intervals for a single clip."""
-    keep_mask = scores >= score_thresh
+    starts_d = starts.detach().float()
+    ends_d = ends.detach().float()
+    scores_d = scores.detach().float()
+
+    keep_mask = scores_d >= score_thresh
     if keep_mask.sum() == 0:
         # Always retain at least the top-1 interval for ranking metrics (mAP)
-        top_idx = int(torch.argmax(scores).item())
-        return [(float(starts[top_idx]), float(ends[top_idx]), float(scores[top_idx]))]
+        top_idx = int(torch.argmax(scores_d).item())
+        return [(float(starts_d[top_idx]), float(ends_d[top_idx]), float(scores_d[top_idx]))]
 
-    s = starts[keep_mask].detach().float().clone()
-    e = ends[keep_mask].detach().float().clone()
-    sc = scores[keep_mask].detach().float().clone()
+    s = starts_d[keep_mask].clone()
+    e = ends_d[keep_mask].clone()
+    sc = scores_d[keep_mask].clone()
 
     selected: list[tuple[float, float, float]] = []
     while sc.numel() > 0 and len(selected) < max_proposals:
@@ -233,20 +237,23 @@ class MultiScaleTemporalPyramidDecoder(nn.Module):
         track_logit = 0.5 * global_logit.float() + 0.5 * peak_logit
 
         proposals_batch: list[list[TemporalProposal]] = []
-        for bi in range(b):
-            decoded = temporal_soft_nms_1d(
-                cat_starts[bi],
-                cat_ends[bi],
-                probs[bi],
-                sigma=self.cfg.soft_nms_sigma,
-                max_proposals=self.cfg.max_proposals,
-            )
-            proposals_batch.append(
-                [
-                    TemporalProposal(start_sec=s, end_sec=e, score=sc, modality=self.modality_name)
-                    for (s, e, sc) in decoded
-                ]
-            )
+        if self.training:
+            proposals_batch = [[] for _ in range(b)]
+        else:
+            for bi in range(b):
+                decoded = temporal_soft_nms_1d(
+                    cat_starts[bi],
+                    cat_ends[bi],
+                    probs[bi],
+                    sigma=self.cfg.soft_nms_sigma,
+                    max_proposals=self.cfg.max_proposals,
+                )
+                proposals_batch.append(
+                    [
+                        TemporalProposal(start_sec=s, end_sec=e, score=sc, modality=self.modality_name)
+                        for (s, e, sc) in decoded
+                    ]
+                )
 
         return {
             "point_logits": cat_logits,

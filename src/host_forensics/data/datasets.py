@@ -62,28 +62,40 @@ class UnifiedForensicManifestDataset(Dataset[dict[str, Any]]):
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         rec = self.records[idx]
-        video: torch.Tensor = torch.load(rec["video_tensor_pt"], map_location="cpu", weights_only=True)
+        video: torch.Tensor = torch.load(rec["video_tensor_pt"], map_location="cpu", weights_only=True).float()
+        if video.shape[-2] != self.img_size or video.shape[-1] != self.img_size:
+            video = torch.nn.functional.interpolate(
+                video, size=(self.img_size, self.img_size), mode="bilinear", align_corners=False
+            )
         if self.augment is not None:
             video = self.augment(video)
 
         has_audio = bool(rec.get("has_audio", False)) and bool(rec.get("audio_tensor_pt"))
         if has_audio:
-            audio = torch.load(rec["audio_tensor_pt"], map_location="cpu", weights_only=True)
+            audio = torch.load(rec["audio_tensor_pt"], map_location="cpu", weights_only=True).float()
         else:
             audio = torch.zeros(self.audio_len, dtype=torch.float32)
 
         has_mask = bool(rec.get("mask_tensor_pt"))
         if has_mask:
             gt_mask = torch.load(rec["mask_tensor_pt"], map_location="cpu", weights_only=True).float()
+            if gt_mask.ndim == 4 and gt_mask.shape[1] == 1:
+                gt_mask = gt_mask.squeeze(1)
+            if gt_mask.shape[-2] != self.img_size or gt_mask.shape[-1] != self.img_size:
+                gt_mask = torch.nn.functional.interpolate(
+                    gt_mask.unsqueeze(1), size=(self.img_size, self.img_size), mode="nearest"
+                ).squeeze(1)
         else:
             gt_mask = torch.zeros(video.shape[0], video.shape[-2], video.shape[-1], dtype=torch.float32)
 
-        vis_iv = [tuple(map(float, seg)) for seg in rec.get("visual_intervals", [])]
-        aud_iv = [tuple(map(float, seg)) for seg in rec.get("audio_intervals", [])]
+        raw_viv = rec.get("visual_intervals")
+        raw_aiv = rec.get("audio_intervals")
+        vis_iv = [tuple(map(float, seg)) for seg in (raw_viv or [])]
+        aud_iv = [tuple(map(float, seg)) for seg in (raw_aiv or [])]
 
         return {
-            "video": video.float(),
-            "audio": audio.float(),
+            "video": video,
+            "audio": audio,
             "has_audio": has_audio,
             "duration_sec": float(rec.get("duration_sec", self.clip_duration_sec)),
             "video_label": float(rec["video_label"]),
@@ -93,8 +105,8 @@ class UnifiedForensicManifestDataset(Dataset[dict[str, Any]]):
             "has_mask_gt": has_mask,
             "visual_intervals": vis_iv,
             "audio_intervals": aud_iv,
-            "has_visual_tfl_gt": "visual_intervals" in rec,
-            "has_audio_tfl_gt": "audio_intervals" in rec,
+            "has_visual_tfl_gt": raw_viv is not None,
+            "has_audio_tfl_gt": raw_aiv is not None,
             "domain": str(rec.get("domain", "default")),
         }
 

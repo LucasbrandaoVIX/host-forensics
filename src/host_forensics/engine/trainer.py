@@ -259,26 +259,33 @@ class HoSTTrainer:
         val_loader: DataLoader[dict[str, Any]],
         stage2_loader: DataLoader[dict[str, Any]] | None = None,
         output_dir: str | None = None,
+        resume_stage1: bool = False,
     ) -> dict[str, Any]:
         """Execute Stage-1 unified training + optional Stage-2 high-res mask/interval refinement + calibration."""
         history: list[dict[str, Any]] = []
         s1_epochs = max(1, self.cfg.train.epochs_stage1)
-        scheduler_s1 = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=s1_epochs, eta_min=self.cfg.train.lr * 0.05
-        )
+        s1_ckpt_path = (Path(output_dir) / "host_moe_stage1.pt") if output_dir else None
 
-        for ep in range(1, s1_epochs + 1):
-            losses = self.train_one_epoch(stage1_loader, epoch_idx=ep)
-            scheduler_s1.step()
-            history.append({"stage": 1, "epoch": ep, **losses})
-
-        if output_dir and self.dist_runtime.is_main:
-            out_p = Path(output_dir)
-            out_p.mkdir(parents=True, exist_ok=True)
-            torch.save(
-                {"config": self.cfg, "model_state_dict": self.raw_model.state_dict()},
-                out_p / "host_moe_stage1.pt",
+        if resume_stage1 and s1_ckpt_path is not None and s1_ckpt_path.exists():
+            ckpt_s1 = torch.load(s1_ckpt_path, map_location=self.device, weights_only=False)
+            self.raw_model.load_state_dict(ckpt_s1["model_state_dict"], strict=True)
+            history.append({"stage": 1, "epoch": s1_epochs, "resumed_from_stage1": 1.0})
+        else:
+            scheduler_s1 = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer, T_max=s1_epochs, eta_min=self.cfg.train.lr * 0.05
             )
+
+            for ep in range(1, s1_epochs + 1):
+                losses = self.train_one_epoch(stage1_loader, epoch_idx=ep)
+                scheduler_s1.step()
+                history.append({"stage": 1, "epoch": ep, **losses})
+
+            if s1_ckpt_path is not None and self.dist_runtime.is_main:
+                s1_ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(
+                    {"config": self.cfg, "model_state_dict": self.raw_model.state_dict()},
+                    s1_ckpt_path,
+                )
 
         s2_epochs = self.cfg.train.epochs_stage2_highres
         if stage2_loader is not None and s2_epochs > 0:
