@@ -236,3 +236,50 @@ def forensic_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "targets": targets,
         "domains": [item["domain"] for item in batch],
     }
+
+
+def build_optimized_dataloader(
+    dataset: Any,
+    batch_size: int,
+    shuffle: bool,
+    device: torch.device | str = "cpu",
+    num_workers: int | None = None,
+    pin_memory: bool = True,
+    prefetch_factor: int = 2,
+    distributed: bool = False,
+    drop_last: bool = False,
+) -> DataLoader[dict[str, Any]]:
+    """Construct an async pinned-memory DataLoader with automatic CPU-count clamping and DDP support."""
+    import os
+    from torch.utils.data import DataLoader
+    from torch.utils.data.distributed import DistributedSampler
+
+    dev = torch.device(device)
+    is_cuda = dev.type == "cuda"
+
+    if num_workers is None:
+        resolved_workers = min(8, os.cpu_count() or 2) if is_cuda else 0
+    elif is_cuda:
+        resolved_workers = max(0, min(num_workers, os.cpu_count() or 2))
+    else:
+        resolved_workers = max(0, num_workers)
+
+    sampler = DistributedSampler(dataset, shuffle=shuffle, drop_last=drop_last) if distributed else None
+    use_pin = bool(pin_memory and is_cuda)
+
+    kwargs: dict[str, Any] = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "shuffle": (shuffle and sampler is None),
+        "sampler": sampler,
+        "num_workers": resolved_workers,
+        "pin_memory": use_pin,
+        "drop_last": drop_last,
+        "collate_fn": forensic_collate_fn,
+    }
+    if resolved_workers > 0:
+        kwargs["persistent_workers"] = True
+        kwargs["prefetch_factor"] = max(1, prefetch_factor)
+
+    return DataLoader(**kwargs)
+

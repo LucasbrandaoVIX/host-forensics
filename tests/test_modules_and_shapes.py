@@ -295,3 +295,73 @@ def test_hf_visual_in_stream_hooks_and_wavlm_audio_backbone() -> None:
     assert aud_backbone.detail_proj.weight.grad is not None
 
 
+def test_gpu_optimizations_lora_merging_batched_moe_and_dataloader() -> None:
+    import torch.nn as nn
+    from host_forensics.config import TriSTMoEConfig
+    from host_forensics.data.datasets import SyntheticManipulatedVideoDataset, build_optimized_dataloader
+    from host_forensics.models.tri_stmoe import TriSTMoEAdapter
+
+    torch.manual_seed(19)
+
+    # 1. Factorized low-rank training vs cached zero-overhead eval weight merging equivalence
+    base = nn.Linear(64, 48, bias=True)
+    ortho = OrthogonalSVDLinear(base, rank=8, principal_rank=16, orthogonal=True)
+    with torch.no_grad():
+        ortho.lora_a.normal_(0.0, 0.25)
+        ortho.lora_b.normal_(0.0, 0.25)
+
+    x = torch.randn(3, 12, 64)
+    ortho.train()
+    assert ortho._merged_eval_weight is None
+    y_train = ortho(x)
+
+    ortho.eval()
+    y_eval = ortho(x)
+    assert ortho._merged_eval_weight is not None
+    assert torch.allclose(y_train, y_eval, atol=1e-5)
+
+    # Reloading state_dict or switching back to train() must invalidate merged eval cache
+    state = ortho.state_dict()
+    ortho.load_state_dict(state)
+    assert ortho._merged_eval_weight is None
+    _ = ortho(x)
+    assert ortho._merged_eval_weight is not None
+    ortho.train()
+    assert ortho._merged_eval_weight is None
+
+    # 2. Batched parallel Tensor-Core expert pools & RoPE cache hit
+    moe_cfg = TriSTMoEConfig(bottleneck_dim=32, num_experts_per_pool=4, top_k=2, num_heads=4, dropout=0.0)
+    adapter = TriSTMoEAdapter(embed_dim=64, res_dim=32, cfg=moe_cfg)
+    with torch.no_grad():
+        adapter.up_proj.weight.normal_(0.0, 0.05)
+
+    tok_in = torch.randn(2, 4, 9, 64, requires_grad=True)
+    res_in = torch.randn(2, 4, 9, 32, requires_grad=True)
+    tok_out = adapter(tok_in, res_in)
+    assert tok_out.shape == (2, 4, 9, 64)
+    assert adapter.pool_t.rope._cos_cache is not None
+    tok_out.sum().backward()
+    assert adapter.pool_s.w_qkv.grad is not None
+    assert adapter.pool_t.w_qkv.grad is not None
+    assert adapter.pool_r.w_kv.grad is not None
+
+    # 3. Async multi-worker DataLoader builder
+    ds = SyntheticManipulatedVideoDataset(length=6, num_frames=4, img_size=64, seed=5)
+    loader = build_optimized_dataloader(
+        dataset=ds,
+        batch_size=3,
+        shuffle=False,
+        device="cpu",
+        num_workers=2,
+        pin_memory=True,
+        prefetch_factor=2,
+    )
+    assert loader.num_workers == 2
+    assert loader.pin_memory is False  # Safely disabled on CPU to avoid CUDA warnings
+    assert loader.persistent_workers is True
+    batches = list(loader)
+    assert len(batches) == 2
+    assert batches[0]["video"].shape == (3, 4, 3, 64, 64)
+
+
+

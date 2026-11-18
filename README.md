@@ -12,7 +12,7 @@ Unlike whole-video synthetic T2V detectors, **HoST-MoE** exploits the foundation
 2. **Orthogonal SVD-LoRA + Auxiliary-Loss-Free Tri-Pool MoE (`Tri-STMoE`)**: Adapts frozen `DINOv3-ViT-L/16` in the orthogonal complement of its principal singular subspace (`Effort`-style) while routing tokens across **Spatial (`Pool S`)**, **Temporal-RoPE (`Pool T`)**, and **Forensic-Residual (`Pool R`)** experts using DeepSeek-V3 / MoSTE **auxiliary-loss-free bias balancing**.
 3. **Self-Referential Host-Prototype Differential Conditioning (`SHDC`)**: Estimates per-clip unmanipulated host feature moments $(\mu_{\text{host}}, \sigma_{\text{host}})$ from soft authenticity anchor tokens, canceling global H.264/H.265 transcoding and neural-restoration shifts to eliminate **cross-domain score polarization** (`Cross-AUC` & `MID-FFD`).
 4. **Modality-Decoupled Native Readouts (`MDNR`) & Kinematic-Prosodic Verifier (`KP-Verify`)**: Separates visual (`D_v`) and audio (`D_a`) multi-scale temporal pyramids to prevent cross-track false-alarm bleed (`AV-FABLE`), while gracefully falling back to a learned **Silent-Prior** token on silent benchmarks (`has_audio=False`).
-5. **Single RTX 5090 (32 GB GDDR7) Training Footprint**: `~24.9M` trainable parameters (`~5.1%` of total), `~18.2 GB` peak `BF16` VRAM at `384x384` (`T=16` frames), `~28 ms/clip` single-pass inference.
+5. **Hardware-Saturated Single- & Multi-GPU Execution**: Batched parallel Tensor-Core MoE pools (`einsum` + grouped FlashAttention-2 SDPA), `32x` lower-FLOP factored SVD-LoRA training with **zero-overhead (`0 ms`) `.eval()` weight merging**, `BF16` inference autocast (`torch.inference_mode`), fused CUDA `AdamW`, `torch.compile`, and native **`torchrun` Multi-GPU `DDP`** (`no_sync()` gradient accumulation + cross-rank router bias synchronization). Fits comfortably on a single RTX 5090 (`~24.9M` trainable params, `~18.2 GB` peak `BF16` VRAM at `384x384`, `T=16`).
 
 ---
 
@@ -30,7 +30,7 @@ Unlike whole-video synthetic T2V detectors, **HoST-MoE** exploits the foundation
 ```text
 host-forensics/
 ├── configs/
-│   ├── rtx5090_unified_train.yaml   # Full DINOv3-L + WavLM BF16 config for 1x RTX 5090 (32 GB)
+│   ├── rtx5090_unified_train.yaml   # Full DINOv3-L + WavLM BF16 config for 1x-8x RTX 5090 / H100
 │   └── smoke_cpu_or_ci.yaml         # Compact offline-safe config for instant CI & smoke tests
 ├── docs/
 │   ├── literature_review_and_mitigation_matrix.md  # 2018-2026 survey & 8-family mitigation matrix
@@ -45,14 +45,14 @@ host-forensics/
 │   ├── prepare_manifests.py         # Multi-benchmark FFmpeg video/audio/mask -> .pt + .jsonl builder
 │   ├── evaluate_benchmarks.py       # Zero-shot Cross-AUC, MID-FFD, AV-mAP, J&F & LaTeX table exporter
 │   ├── run_poc_experiments.py       # Reproducible CPU empirical verification of SHDC, MoE & MN-Stem
-│   └── run_rtx5090_suite.sh         # Turnkey Stage-1/Stage-2 training, zero-shot eval & ablation runner
+│   └── run_rtx5090_suite.sh         # Turnkey 1x/Nx-GPU Stage-1/Stage-2 training, eval & ablation runner
 ├── src/host_forensics/
 │   ├── config.py                    # Typed dataclasses & YAML serialization
 │   ├── cli.py                       # `host-detect` CLI (info, smoke-train, train, infer, dump-config)
 │   ├── models/
 │   │   ├── mn_stem.py               # Bayar zero-DC conv, SRM bank, Local Cost-Volume Motion Residual
-│   │   ├── backbones.py             # OrthogonalSVDLinear, MultiPriorVisualBackbone, FrozenAudioBackbone
-│   │   ├── tri_stmoe.py             # Spatial/Temporal-RoPE/Residual experts + BiasBalancedTopKRouter
+│   │   ├── backbones.py             # OrthogonalSVDLinear (factored train + 0ms eval merge), DINOv3 & WavLM
+│   │   ├── tri_stmoe.py             # Batched Spatial/Temporal-RoPE/Residual expert pools + BiasBalancedTopKRouter
 │   │   ├── shdc.py                  # SelfReferentialHostConditioning (median-gated, affine-invariant)
 │   │   ├── heads.py                 # KP-Verify (Silent-Prior), Multi-Scale Temporal Pyramid, Tubelet Mask Head
 │   │   └── host_model.py            # HoSTForensicsModel & PristineQuantileCalibrator
@@ -63,11 +63,11 @@ host-forensics/
 │   ├── data/
 │   │   ├── video_io.py              # FFmpeg/FFprobe raw .mp4/.mkv/.webm video, 16kHz audio & mask decoding
 │   │   ├── transforms.py            # Compound codec degradation & symmetric VAE/restoration laundering
-│   │   └── datasets.py              # Unified JSONL Manifest Dataset & Synthetic Manipulated Video Dataset
+│   │   └── datasets.py              # Unified JSONL Manifest Dataset & pinned/prefetched/DDP DataLoader builder
 │   └── engine/
-│       └── trainer.py               # Two-stage BF16 curriculum trainer, MoE bias step & pristine calibration
+│       └── trainer.py               # Two-stage BF16 DDP/single-GPU trainer, fused AdamW & pristine calibration
 └── tests/
-    ├── test_modules_and_shapes.py   # Invariant & gradient verification tests
+    ├── test_modules_and_shapes.py   # Invariant, gradient, LoRA eval-merge & batched MoE verification tests
     ├── test_losses_and_metrics.py   # Multi-task loss, calibrator, and 2026 forensic metric tests
     └── test_video_io_and_scripts.py # End-to-end FFmpeg .mp4 -> manifest -> 2-stage train -> eval -> LaTeX test
 ```
@@ -81,7 +81,7 @@ host-forensics/
 ```bash
 uv venv .venv --python 3.11
 uv pip install --python .venv/bin/python -e ".[dev]"
-# On your RTX 5090 workstation with HuggingFace Hub access for DINOv3-L & WavLM-Large:
+# On your GPU workstation with HuggingFace Hub access for DINOv3-L & WavLM-Large:
 uv pip install --python .venv/bin/python -e ".[hub,dev]"
 ```
 
@@ -93,7 +93,7 @@ uv pip install --python .venv/bin/python -e ".[hub,dev]"
 .venv/bin/python scripts/run_poc_experiments.py
 ```
 
-### 3. Prepare Raw Video Benchmarks & Run Two-Stage RTX 5090 Suite
+### 3. Prepare Raw Video Benchmarks & Run Single- or Multi-GPU Training Suite
 
 ```bash
 # Convert raw benchmark folder (generic, df40, manivid, av_deepfake1m, av_fable) into .pt + .jsonl
@@ -104,18 +104,22 @@ uv pip install --python .venv/bin/python -e ".[hub,dev]"
   --tensor-dir /data/forensics/tensors/manivid \
   --workers 8
 
-# Launch full Stage-1 (384px) + Stage-2 (448px) curriculum, zero-shot evaluation, LaTeX export & ablations
-DATA_ROOT=/data/forensics bash scripts/run_rtx5090_suite.sh
+# Single RTX 5090 (with optional torch.compile kernel fusion):
+DATA_ROOT=/data/forensics USE_COMPILE=1 bash scripts/run_rtx5090_suite.sh
+
+# Multi-GPU (e.g., 4x RTX 5090 / H100 via native torchrun DDP + no_sync grad accumulation):
+DATA_ROOT=/data/forensics NPROC_PER_NODE=4 USE_COMPILE=1 bash scripts/run_rtx5090_suite.sh
 ```
 
 ### 4. Structured Zero-Shot Inference (Direct `.mp4` or `.pt`, Audio-Visual or Silent)
 
 ```bash
-# Direct inference on any raw .mp4/.mkv/.webm video (auto-detects audio stream via ffprobe!)
+# Direct BF16 inference on any raw .mp4/.mkv/.webm video (0ms merged LoRA + FlashAttention-2)
 .venv/bin/host-detect infer \
   --config configs/rtx5090_unified_train.yaml \
   --checkpoint checkpoints/rtx5090_main/host_moe_calibrated.pt \
-  --video suspicious_clip.mp4
+  --video suspicious_clip.mp4 \
+  --compile
 
 # Force visual-only Silent-Prior fallback
 .venv/bin/host-detect infer \

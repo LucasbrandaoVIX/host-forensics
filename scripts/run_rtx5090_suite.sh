@@ -6,20 +6,43 @@ DATA_ROOT="${DATA_ROOT:-/data/forensics}"
 OUT_ROOT="${OUT_ROOT:-checkpoints/rtx5090_main}"
 PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"
 HOST_CLI="${HOST_CLI:-.venv/bin/host-detect}"
+TORCHRUN_BIN="${TORCHRUN_BIN:-.venv/bin/torchrun}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
+MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+MASTER_PORT="${MASTER_PORT:-29505}"
+USE_COMPILE="${USE_COMPILE:-0}"
 
-echo "[1/3] Launching HoST-MoE Stage-1 (384px) + Stage-2 (448px) Unified Training & Pristine Calibration..."
-"${HOST_CLI}" train \
-  --config configs/rtx5090_unified_train.yaml \
-  --train-manifest "${DATA_ROOT}/manifests/unified_stage1_train.jsonl" \
-  --stage2-manifest "${DATA_ROOT}/manifests/highres_stage2_mask_tfl.jsonl" \
-  --val-manifest "${DATA_ROOT}/manifests/pristine_and_val.jsonl" \
-  --output-dir "${OUT_ROOT}" \
-  --device cuda
+EXTRA_ARGS=()
+if [[ "${USE_COMPILE}" == "1" ]]; then
+  EXTRA_ARGS+=("--compile")
+fi
+
+echo "[1/3] Launching HoST-MoE Stage-1 (384px) + Stage-2 (448px) Unified Training & Pristine Calibration (GPUs=${NPROC_PER_NODE})..."
+if [[ "${NPROC_PER_NODE}" -gt 1 ]]; then
+  "${TORCHRUN_BIN}" --nproc_per_node="${NPROC_PER_NODE}" --master_addr="${MASTER_ADDR}" --master_port="${MASTER_PORT}" -m host_forensics.cli train \
+    --config configs/rtx5090_unified_train.yaml \
+    --train-manifest "${DATA_ROOT}/manifests/unified_stage1_train.jsonl" \
+    --stage2-manifest "${DATA_ROOT}/manifests/highres_stage2_mask_tfl.jsonl" \
+    --val-manifest "${DATA_ROOT}/manifests/pristine_and_val.jsonl" \
+    --output-dir "${OUT_ROOT}" \
+    --device cuda \
+    "${EXTRA_ARGS[@]}"
+else
+  "${HOST_CLI}" train \
+    --config configs/rtx5090_unified_train.yaml \
+    --train-manifest "${DATA_ROOT}/manifests/unified_stage1_train.jsonl" \
+    --stage2-manifest "${DATA_ROOT}/manifests/highres_stage2_mask_tfl.jsonl" \
+    --val-manifest "${DATA_ROOT}/manifests/pristine_and_val.jsonl" \
+    --output-dir "${OUT_ROOT}" \
+    --device cuda \
+    "${EXTRA_ARGS[@]}"
+fi
 
 echo "[2/3] Evaluating Zero-Shot Generalization, Cross-AUC Polarization, AV-mAP, and Spatial J&F..."
 "${PYTHON_BIN}" scripts/evaluate_benchmarks.py \
   --config configs/rtx5090_unified_train.yaml \
   --checkpoint "${OUT_ROOT}/host_moe_calibrated.pt" \
+  "${EXTRA_ARGS[@]}" \
   --benchmark "DF40=${DATA_ROOT}/manifests/test_df40_unseen.jsonl" \
   --benchmark "CelebDFpp=${DATA_ROOT}/manifests/test_celebdf_pp.jsonl" \
   --benchmark "TalkingHead=${DATA_ROOT}/manifests/test_talkingheadbench.jsonl" \

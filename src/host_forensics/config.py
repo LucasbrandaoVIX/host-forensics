@@ -114,6 +114,11 @@ class TrainConfig:
     compound_degradation_prob: float = 0.50
     symmetric_laundering_prob: float = 0.15  # Applied equally to real & fake!
     grad_clip_norm: float = 1.0
+    eval_batch_size: int = 8
+    num_workers: int = 8
+    pin_memory: bool = True
+    prefetch_factor: int = 2
+    compile_model: bool = False
 
 
 @dataclass

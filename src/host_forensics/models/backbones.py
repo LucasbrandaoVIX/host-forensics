@@ -103,24 +103,51 @@ class OrthogonalSVDLinear(nn.Module):
 
         self.lora_a = nn.Parameter(torch.randn(rank, in_features) * 0.02)
         self.lora_b = nn.Parameter(torch.zeros(out_features, rank))
+        self._merged_eval_weight: torch.Tensor | None = None
 
-    def delta_weight_orthogonal(self) -> torch.Tensor:
-        """Compute Delta W_perp = (I - U_k U_k^T) B A (I - V_k V_k^T), or unconstrained B A if not orthogonal."""
+    def train(self, mode: bool = True) -> "OrthogonalSVDLinear":
+        super().train(mode)
+        if mode:
+            self._merged_eval_weight = None
+        return self
+
+    def _load_from_state_dict(self, *args: Any, **kwargs: Any) -> None:
+        self._merged_eval_weight = None
+        super()._load_from_state_dict(*args, **kwargs)
+
+    def orthogonal_factors(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return rank-r factor pair `(a_eff, b_eff)` of shapes `(r, d_in)` and `(d_out, r)`."""
         a_fp32 = self.lora_a.float()
         b_fp32 = self.lora_b.float()
         if not self.orthogonal:
-            return (b_fp32 @ a_fp32) * self.scale
-        # Project rows of A orthogonal to V_k: A_perp = A - (A V_k) V_k^T
+            return a_fp32, b_fp32 * self.scale
         a_perp = a_fp32 - (a_fp32 @ self.v_k) @ self.v_k.T
-        # Project cols of B orthogonal to U_k: B_perp = B - U_k (U_k^T B)
-        b_perp = b_fp32 - self.u_k @ (self.u_k.T @ b_fp32)
-        return (b_perp @ a_perp) * self.scale
+        b_perp = (b_fp32 - self.u_k @ (self.u_k.T @ b_fp32)) * self.scale
+        return a_perp, b_perp
+
+    def delta_weight_orthogonal(self) -> torch.Tensor:
+        """Compute full Delta W_perp = b_eff @ a_eff (used for inspection and one-shot eval merging)."""
+        a_eff, b_eff = self.orthogonal_factors()
+        return b_eff @ a_eff
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bias = self.bias0.to(dtype=x.dtype) if self.bias0 is not None else None
+        if not self.training:
+            if (
+                self._merged_eval_weight is None
+                or self._merged_eval_weight.device != x.device
+                or self._merged_eval_weight.dtype != x.dtype
+            ):
+                with torch.no_grad():
+                    merged_fp32 = self.weight0.float() + self.delta_weight_orthogonal()
+                    self._merged_eval_weight = merged_fp32.to(device=x.device, dtype=x.dtype)
+            return F.linear(x, self._merged_eval_weight, bias)
+
+        # Factorized O(N * r * (d_in + d_out)) training path (32x fewer FLOPs than dense d_out x d_in)
+        a_eff, b_eff = self.orthogonal_factors()
         base_out = F.linear(x, self.weight0.to(dtype=x.dtype), bias)
-        dw = self.delta_weight_orthogonal().to(dtype=x.dtype)
-        return base_out + F.linear(x, dw)
+        lora_out = F.linear(F.linear(x, a_eff.to(dtype=x.dtype)), b_eff.to(dtype=x.dtype))
+        return base_out + lora_out
 
 
 class _StandInViTBlock(nn.Module):
@@ -322,9 +349,12 @@ class MultiPriorVisualBackbone(nn.Module):
 
     def train(self, mode: bool = True) -> "MultiPriorVisualBackbone":
         super().train(mode)
-        # Keep frozen pretrained ViT deterministic (disable pretrained DropPath/dropout noise)
+        # Keep frozen pretrained ViT deterministic while letting OrthogonalSVDLinear track train/eval
         if self._hf_model is not None:
             self._hf_model.eval()
+            for mod in self._hf_model.modules():
+                if isinstance(mod, OrthogonalSVDLinear):
+                    mod.train(mode)
         return self
 
     def forward(

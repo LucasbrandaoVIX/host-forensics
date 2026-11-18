@@ -21,7 +21,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from host_forensics.config import HoSTConfig
-from host_forensics.data.datasets import UnifiedForensicManifestDataset, forensic_collate_fn
+from host_forensics.data.datasets import UnifiedForensicManifestDataset, build_optimized_dataloader
+from host_forensics.engine.trainer import configure_cuda_hardware_acceleration
 from host_forensics.metrics.evaluation import (
     compute_auroc,
     compute_eer,
@@ -34,12 +35,14 @@ from host_forensics.models.heads import TemporalProposal
 from host_forensics.models.host_model import HoSTForensicsModel
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def evaluate_single_manifest(
     model: HoSTForensicsModel,
     manifest_path: str | Path,
     cfg: HoSTConfig,
     device: torch.device,
+    batch_size: int | None = None,
+    num_workers: int | None = None,
 ) -> dict[str, Any]:
     ds = UnifiedForensicManifestDataset(
         manifest_path=manifest_path,
@@ -48,7 +51,15 @@ def evaluate_single_manifest(
         sample_rate=cfg.backbone.sample_rate,
         clip_duration_sec=cfg.train.clip_duration_sec,
     )
-    loader = DataLoader(ds, batch_size=cfg.train.batch_size, shuffle=False, collate_fn=forensic_collate_fn)
+    loader = build_optimized_dataloader(
+        dataset=ds,
+        batch_size=batch_size or cfg.train.eval_batch_size,
+        shuffle=False,
+        device=device,
+        num_workers=cfg.train.num_workers if num_workers is None else num_workers,
+        pin_memory=cfg.train.pin_memory,
+        prefetch_factor=cfg.train.prefetch_factor,
+    )
 
     all_labels: list[float] = []
     all_probs: list[float] = []
@@ -63,16 +74,17 @@ def evaluate_single_manifest(
 
     model.eval()
     for batch in loader:
-        video = batch["video"].to(device)
-        audio = batch["audio"].to(device)
-        has_audio = batch["has_audio"].to(device)
+        video = batch["video"].to(device, non_blocking=True)
+        audio = batch["audio"].to(device, non_blocking=True)
+        has_audio = batch["has_audio"].to(device, non_blocking=True)
         targets = batch["targets"]
 
-        out = model(video=video, audio=audio, has_audio=has_audio, duration_sec=batch["duration_sec"])
+        with model._inference_amp_context(device):  # type: ignore[attr-defined]
+            out = model(video=video, audio=audio, has_audio=has_audio, duration_sec=batch["duration_sec"])
         probs = (
-            out.calibrated_prob.detach().cpu().tolist()
+            out.calibrated_prob.detach().float().cpu().tolist()
             if out.calibrated_prob is not None
-            else torch.sigmoid(out.video_logit).detach().cpu().tolist()
+            else torch.sigmoid(out.video_logit.float()).detach().cpu().tolist()
         )
         all_labels.extend(targets.video_label.tolist())
         all_probs.extend(probs)
@@ -138,16 +150,22 @@ def main() -> None:
     parser.add_argument("--output-json", type=str, default="eval_results.json")
     parser.add_argument("--latex-out", type=str, default=None, help="Optional destination .tex row snippet")
     parser.add_argument("--method-name", type=str, default="HoST-MoE (Ours)")
+    parser.add_argument("--batch-size", type=int, default=None, help="Override evaluation batch size")
+    parser.add_argument("--num-workers", type=int, default=None, help="Override DataLoader worker count")
+    parser.add_argument("--compile", action="store_true", help="Enable torch.compile on forensic submodules")
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
 
     cfg = HoSTConfig.from_yaml(args.config)
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
+    configure_cuda_hardware_acceleration(device)
 
     model = HoSTForensicsModel(cfg).to(device)
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     state = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
     model.load_state_dict(state, strict=True)
+    if args.compile or cfg.train.compile_model:
+        model.compile_forensic_submodules()
 
     per_bench: dict[str, dict[str, Any]] = {}
     domain_pairs: dict[str, tuple[list[float], list[float]]] = {}
@@ -158,7 +176,14 @@ def main() -> None:
         if "=" not in spec:
             raise ValueError(f"Expected Name=/path/to/manifest.jsonl, got {spec}")
         b_name, m_path = spec.split("=", 1)
-        b_res = evaluate_single_manifest(model, m_path, cfg, device)
+        b_res = evaluate_single_manifest(
+            model,
+            m_path,
+            cfg,
+            device,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+        )
         domain_pairs[b_name] = (b_res.pop("labels"), b_res.pop("probs"))
         pooled_labels.extend(domain_pairs[b_name][0])
         pooled_probs.extend(domain_pairs[b_name][1])

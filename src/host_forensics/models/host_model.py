@@ -287,7 +287,35 @@ class HoSTForensicsModel(nn.Module):
             "trainable_pct": round(100.0 * trainable / max(total, 1), 2),
         }
 
-    @torch.no_grad()
+    def _inference_amp_context(self, device: torch.device) -> object:
+        from contextlib import nullcontext
+
+        if device.type == "cuda":
+            if self.cfg.train.precision == "fp16":
+                return torch.autocast(device_type="cuda", dtype=torch.float16)
+            if self.cfg.train.precision in {"bf16", "fp32"}:
+                # Default to BF16 Tensor Core + FlashAttention-2 acceleration on Ampere/Ada/Blackwell GPUs
+                if self.cfg.train.precision == "bf16":
+                    return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        return nullcontext()
+
+    def compile_forensic_submodules(self, mode: str = "default") -> None:
+        """Apply `torch.compile(..., dynamic=True)` to trainable forensic adapters and decoders."""
+        if not hasattr(torch, "compile"):
+            return
+        self.mn_stem = torch.compile(self.mn_stem, mode=mode, dynamic=True)  # type: ignore[assignment]
+        self.visual_shdc = torch.compile(self.visual_shdc, mode=mode, dynamic=True)  # type: ignore[assignment]
+        self.audio_shdc = torch.compile(self.audio_shdc, mode=mode, dynamic=True)  # type: ignore[assignment]
+        self.kp_verifier = torch.compile(self.kp_verifier, mode=mode, dynamic=True)  # type: ignore[assignment]
+        self.visual_pyramid = torch.compile(self.visual_pyramid, mode=mode, dynamic=True)  # type: ignore[assignment]
+        self.audio_pyramid = torch.compile(self.audio_pyramid, mode=mode, dynamic=True)  # type: ignore[assignment]
+        self.mask_decoder = torch.compile(self.mask_decoder, mode=mode, dynamic=True)  # type: ignore[assignment]
+        for key in list(self.visual_backbone.moe_adapters.keys()):
+            self.visual_backbone.moe_adapters[key] = torch.compile(  # type: ignore[assignment]
+                self.visual_backbone.moe_adapters[key], mode=mode, dynamic=True
+            )
+
+    @torch.inference_mode()
     def predict_structured(
         self,
         video: torch.Tensor,
@@ -295,10 +323,11 @@ class HoSTForensicsModel(nn.Module):
         has_audio: torch.Tensor | None = None,
         duration_sec: float = 4.0,
     ) -> list[dict[str, object]]:
-        """Run inference and format human/API-friendly JSON records per clip."""
+        """Run fast BF16/inference_mode forward pass and format JSON records per clip."""
         was_training = self.training
         self.eval()
-        out = self.forward(video, audio=audio, has_audio=has_audio, duration_sec=duration_sec)
+        with self._inference_amp_context(video.device):  # type: ignore[attr-defined]
+            out = self.forward(video, audio=audio, has_audio=has_audio, duration_sec=duration_sec)
         if was_training:
             self.train()
 

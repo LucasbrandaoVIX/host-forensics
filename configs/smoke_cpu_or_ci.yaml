@@ -75,3 +75,8 @@ train:
   compound_degradation_prob: 0.5
   symmetric_laundering_prob: 0.15
   grad_clip_norm: 1.0
+  eval_batch_size: 4
+  num_workers: 0
+  pin_memory: false
+  prefetch_factor: 2
+  compile_model: false

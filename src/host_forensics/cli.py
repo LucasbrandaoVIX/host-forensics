@@ -13,10 +13,15 @@ from host_forensics.config import BackboneConfig, HoSTConfig, MNStemConfig, Read
 from host_forensics.data.datasets import (
     SyntheticManipulatedVideoDataset,
     UnifiedForensicManifestDataset,
+    build_optimized_dataloader,
     forensic_collate_fn,
 )
 from host_forensics.data.transforms import CompoundDegradationAndLaundering
-from host_forensics.engine.trainer import HoSTTrainer
+from host_forensics.engine.trainer import (
+    HoSTTrainer,
+    cleanup_distributed_if_needed,
+    configure_cuda_hardware_acceleration,
+)
 from host_forensics.models.host_model import HoSTForensicsModel
 
 
@@ -63,12 +68,15 @@ def _build_compact_smoke_config() -> HoSTConfig:
         train=TrainConfig(
             precision="fp32",
             batch_size=4,
+            eval_batch_size=4,
             grad_accum_steps=1,
             num_frames=4,
             clip_duration_sec=2.0,
             lr=1e-3,
             epochs_stage1=1,
             epochs_stage2_highres=0,
+            num_workers=0,
+            pin_memory=False,
         ),
     )
 
@@ -115,6 +123,10 @@ def cmd_smoke_train(args: argparse.Namespace) -> int:
     cfg = _load_or_default_config(args.config, compact_default=True)
     torch.manual_seed(42)
 
+    model = HoSTForensicsModel(cfg)
+    trainer = HoSTTrainer(model=model, cfg=cfg, device=args.device)
+    is_ddp = trainer.dist_runtime.enabled
+
     augment = CompoundDegradationAndLaundering(
         degradation_prob=cfg.train.compound_degradation_prob,
         symmetric_laundering_prob=cfg.train.symmetric_laundering_prob,
@@ -138,133 +150,163 @@ def cmd_smoke_train(args: argparse.Namespace) -> int:
         seed=999,
     )
 
-    train_loader = DataLoader(
-        train_ds,
+    train_loader = build_optimized_dataloader(
+        dataset=train_ds,
         batch_size=cfg.train.batch_size,
         shuffle=True,
-        collate_fn=forensic_collate_fn,
+        device=trainer.device,
+        num_workers=0,
+        pin_memory=False,
+        distributed=is_ddp,
     )
-    val_loader = DataLoader(
-        val_ds,
+    val_loader = build_optimized_dataloader(
+        dataset=val_ds,
         batch_size=cfg.train.batch_size,
         shuffle=False,
-        collate_fn=forensic_collate_fn,
+        device=trainer.device,
+        num_workers=0,
+        pin_memory=False,
+        distributed=is_ddp,
     )
 
-    model = HoSTForensicsModel(cfg)
-    trainer = HoSTTrainer(model=model, cfg=cfg, device=args.device)
+    try:
+        metrics_history: list[dict[str, float]] = []
+        for ep in range(1, args.epochs + 1):
+            epoch_losses = trainer.train_one_epoch(train_loader, epoch_idx=ep)
+            metrics_history.append({k: round(v, 5) for k, v in epoch_losses.items()})
 
-    metrics_history: list[dict[str, float]] = []
-    for _ in range(args.epochs):
-        epoch_losses = trainer.train_one_epoch(train_loader)
-        metrics_history.append({k: round(v, 5) for k, v in epoch_losses.items()})
+        cal_info = trainer.calibrate_on_pristine(val_loader)
 
-    cal_info = trainer.calibrate_on_pristine(val_loader)
+        if trainer.dist_runtime.is_main:
+            demo_batch = next(iter(val_loader))
+            preds = model.predict_structured(
+                video=demo_batch["video"].to(trainer.device),
+                audio=demo_batch["audio"].to(trainer.device),
+                has_audio=demo_batch["has_audio"].to(trainer.device),
+                duration_sec=demo_batch["duration_sec"],
+            )
 
-    # Run structured inference on a 4-sample batch covering all 4 synthetic regimes
-    demo_batch = next(iter(val_loader))
-    preds = model.predict_structured(
-        video=demo_batch["video"].to(trainer.device),
-        audio=demo_batch["audio"].to(trainer.device),
-        has_audio=demo_batch["has_audio"].to(trainer.device),
-        duration_sec=demo_batch["duration_sec"],
-    )
+            first_adapter_key = sorted(model.visual_backbone.moe_adapters.keys())[0]
+            moe_loads = model.visual_backbone.moe_adapters[first_adapter_key].expert_load_summary()  # type: ignore[operator]
 
-    first_adapter_key = sorted(model.visual_backbone.moe_adapters.keys())[0]
-    moe_loads = model.visual_backbone.moe_adapters[first_adapter_key].expert_load_summary()  # type: ignore[operator]
-
-    report = {
-        "status": "ok",
-        "device": str(trainer.device),
-        "parameter_summary": model.parameter_summary(),
-        "train_epochs": metrics_history,
-        "pristine_calibration": {k: round(v, 5) for k, v in cal_info.items()},
-        "sample_moe_load_layer_" + first_adapter_key: {
-            pool: [round(x, 4) for x in loads] for pool, loads in moe_loads.items()
-        },
-        "demo_predictions": preds[:4],
-    }
-    print(json.dumps(report, indent=2))
+            report = {
+                "status": "ok",
+                "device": str(trainer.device),
+                "world_size": trainer.dist_runtime.world_size,
+                "parameter_summary": model.parameter_summary(),
+                "train_epochs": metrics_history,
+                "pristine_calibration": {k: round(v, 5) for k, v in cal_info.items()},
+                "sample_moe_load_layer_" + first_adapter_key: {
+                    pool: [round(x, 4) for x in loads] for pool, loads in moe_loads.items()
+                },
+                "demo_predictions": preds[:4],
+            }
+            print(json.dumps(report, indent=2))
+    finally:
+        cleanup_distributed_if_needed()
     return 0
 
 
 def cmd_train(args: argparse.Namespace) -> int:
     cfg = _load_or_default_config(args.config, compact_default=False)
+    if args.epochs is not None:
+        cfg.train.epochs_stage1 = args.epochs
+    if args.num_workers is not None:
+        cfg.train.num_workers = args.num_workers
+    if args.compile:
+        cfg.train.compile_model = True
+
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    augment = CompoundDegradationAndLaundering(
-        degradation_prob=cfg.train.compound_degradation_prob,
-        symmetric_laundering_prob=cfg.train.symmetric_laundering_prob,
-    )
-    train_ds = UnifiedForensicManifestDataset(
-        manifest_path=args.train_manifest,
-        num_frames=cfg.train.num_frames,
-        img_size=cfg.backbone.img_size,
-        sample_rate=cfg.backbone.sample_rate,
-        clip_duration_sec=cfg.train.clip_duration_sec,
-        augment=augment,
-    )
-    val_ds = UnifiedForensicManifestDataset(
-        manifest_path=args.val_manifest,
-        num_frames=cfg.train.num_frames,
-        img_size=cfg.backbone.img_size,
-        sample_rate=cfg.backbone.sample_rate,
-        clip_duration_sec=cfg.train.clip_duration_sec,
-        augment=None,
-    )
+    model = HoSTForensicsModel(cfg)
+    trainer = HoSTTrainer(model=model, cfg=cfg, device=args.device)
+    is_ddp = trainer.dist_runtime.enabled
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.train.batch_size,
-        shuffle=True,
-        collate_fn=forensic_collate_fn,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=cfg.train.batch_size,
-        shuffle=False,
-        collate_fn=forensic_collate_fn,
-    )
-
-    stage2_loader: DataLoader[dict[str, object]] | None = None
-    if args.stage2_manifest:
-        stage2_ds = UnifiedForensicManifestDataset(
-            manifest_path=args.stage2_manifest,
+    try:
+        augment = CompoundDegradationAndLaundering(
+            degradation_prob=cfg.train.compound_degradation_prob,
+            symmetric_laundering_prob=cfg.train.symmetric_laundering_prob,
+        )
+        train_ds = UnifiedForensicManifestDataset(
+            manifest_path=args.train_manifest,
             num_frames=cfg.train.num_frames,
-            img_size=cfg.train.highres_img_size,
+            img_size=cfg.backbone.img_size,
             sample_rate=cfg.backbone.sample_rate,
             clip_duration_sec=cfg.train.clip_duration_sec,
             augment=augment,
         )
-        stage2_loader = DataLoader(
-            stage2_ds,
-            batch_size=max(1, cfg.train.batch_size // 2),
+        val_ds = UnifiedForensicManifestDataset(
+            manifest_path=args.val_manifest,
+            num_frames=cfg.train.num_frames,
+            img_size=cfg.backbone.img_size,
+            sample_rate=cfg.backbone.sample_rate,
+            clip_duration_sec=cfg.train.clip_duration_sec,
+            augment=None,
+        )
+
+        train_loader = build_optimized_dataloader(
+            dataset=train_ds,
+            batch_size=cfg.train.batch_size,
             shuffle=True,
-            collate_fn=forensic_collate_fn,
+            device=trainer.device,
+            num_workers=cfg.train.num_workers,
+            pin_memory=cfg.train.pin_memory,
+            prefetch_factor=cfg.train.prefetch_factor,
+            distributed=is_ddp,
+        )
+        val_loader = build_optimized_dataloader(
+            dataset=val_ds,
+            batch_size=cfg.train.eval_batch_size,
+            shuffle=False,
+            device=trainer.device,
+            num_workers=cfg.train.num_workers,
+            pin_memory=cfg.train.pin_memory,
+            prefetch_factor=cfg.train.prefetch_factor,
+            distributed=is_ddp,
         )
 
-    if args.epochs is not None:
-        cfg.train.epochs_stage1 = args.epochs
+        stage2_loader: DataLoader[dict[str, object]] | None = None
+        if args.stage2_manifest:
+            stage2_ds = UnifiedForensicManifestDataset(
+                manifest_path=args.stage2_manifest,
+                num_frames=cfg.train.num_frames,
+                img_size=cfg.train.highres_img_size,
+                sample_rate=cfg.backbone.sample_rate,
+                clip_duration_sec=cfg.train.clip_duration_sec,
+                augment=augment,
+            )
+            stage2_loader = build_optimized_dataloader(
+                dataset=stage2_ds,
+                batch_size=max(1, cfg.train.batch_size // 2),
+                shuffle=True,
+                device=trainer.device,
+                num_workers=cfg.train.num_workers,
+                pin_memory=cfg.train.pin_memory,
+                prefetch_factor=cfg.train.prefetch_factor,
+                distributed=is_ddp,
+            )
 
-    model = HoSTForensicsModel(cfg)
-    trainer = HoSTTrainer(model=model, cfg=cfg, device=args.device)
-    result = trainer.run_two_stage_curriculum(
-        stage1_loader=train_loader,
-        val_loader=val_loader,
-        stage2_loader=stage2_loader,
-        output_dir=str(out_dir),
-    )
-    print(
-        json.dumps(
-            {
-                "saved_checkpoint": result["checkpoint"],
-                "epochs_completed": len(result["history"]),
-                "calibration": result["calibration"],
-            },
-            indent=2,
+        result = trainer.run_two_stage_curriculum(
+            stage1_loader=train_loader,
+            val_loader=val_loader,
+            stage2_loader=stage2_loader,
+            output_dir=str(out_dir),
         )
-    )
+        if trainer.dist_runtime.is_main:
+            print(
+                json.dumps(
+                    {
+                        "saved_checkpoint": result["checkpoint"],
+                        "epochs_completed": len(result["history"]),
+                        "world_size": trainer.dist_runtime.world_size,
+                        "calibration": result["calibration"],
+                    },
+                    indent=2,
+                )
+            )
+    finally:
+        cleanup_distributed_if_needed()
     return 0
 
 
@@ -273,12 +315,15 @@ def cmd_infer(args: argparse.Namespace) -> int:
 
     cfg = _load_or_default_config(args.config, compact_default=True)
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
-    model = HoSTForensicsModel(cfg).to(device)
+    configure_cuda_hardware_acceleration(device)
 
+    model = HoSTForensicsModel(cfg).to(device)
     if args.checkpoint:
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
         state = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
         model.load_state_dict(state, strict=True)
+    if args.compile or cfg.train.compile_model:
+        model.compile_forensic_submodules()
 
     audio: torch.Tensor | None = None
     has_audio: torch.Tensor | None = None
@@ -292,10 +337,10 @@ def cmd_infer(args: argparse.Namespace) -> int:
             sample_rate=cfg.backbone.sample_rate,
             max_duration_sec=args.duration_sec,
         )
-        video = decoded["video"].unsqueeze(0).to(device)
+        video = decoded["video"].unsqueeze(0).to(device, non_blocking=True)
         clip_dur = float(decoded["duration_sec"])
         if not args.silent and bool(decoded["has_audio"]):
-            audio = decoded["audio"].unsqueeze(0).to(device)
+            audio = decoded["audio"].unsqueeze(0).to(device, non_blocking=True)
             has_audio = torch.ones(1, dtype=torch.bool, device=device)
         else:
             has_audio = torch.zeros(1, dtype=torch.bool, device=device)
@@ -367,6 +412,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--stage2-manifest", type=str, default=None, help="Optional high-res Stage-2 mask/TFL manifest")
     p_train.add_argument("--output-dir", type=str, default="checkpoints", help="Checkpoint output directory")
     p_train.add_argument("--epochs", type=int, default=None, help="Override stage-1 epoch count")
+    p_train.add_argument("--num-workers", type=int, default=None, help="Override DataLoader worker count")
+    p_train.add_argument("--compile", action="store_true", help="Enable torch.compile on forensic submodules")
     p_train.add_argument("--device", type=str, default=None, help="Torch device")
     p_train.set_defaults(func=cmd_train)
 
@@ -378,6 +425,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_infer.add_argument("--audio-pt", type=str, default=None, help="Path to pre-extracted (L_a,) 16kHz audio tensor (.pt)")
     p_infer.add_argument("--silent", action="store_true", help="Force graceful visual-only Silent-Prior fallback")
     p_infer.add_argument("--duration-sec", type=float, default=None, help="Clip duration in seconds")
+    p_infer.add_argument("--compile", action="store_true", help="Enable torch.compile on forensic submodules")
     p_infer.add_argument("--device", type=str, default=None, help="Torch device")
     p_infer.set_defaults(func=cmd_infer)
 
